@@ -2,7 +2,6 @@ using System.Buffers.Binary;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Net;
-using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 
@@ -33,12 +32,12 @@ internal static class MacOsNetworkNative
     {
         if (address.AddressFamily == AddressFamily.InterNetwork)
         {
-            return AddAddressWithIfconfig(interfaceName, address, prefixLength);
+            return AddAddressIpv4(interfaceName, address, prefixLength);
         }
 
         if (address.AddressFamily == AddressFamily.InterNetworkV6)
         {
-            return AddAddressWithIfconfig(interfaceName, address, prefixLength);
+            return AddAddressIpv6(interfaceName, address, prefixLength);
         }
 
         throw new PlatformNotSupportedException($"Address family {address.AddressFamily} is not supported.");
@@ -48,102 +47,17 @@ internal static class MacOsNetworkNative
     {
         if (address.AddressFamily == AddressFamily.InterNetwork)
         {
-            DeleteAddressWithIfconfig(interfaceName, address, prefixLength);
+            DeleteAddressIpv4(interfaceName, address, prefixLength);
             return;
         }
 
         if (address.AddressFamily == AddressFamily.InterNetworkV6)
         {
-            DeleteAddressWithIfconfig(interfaceName, address, prefixLength);
+            DeleteAddressIpv6(interfaceName, address, prefixLength);
             return;
         }
 
         throw new PlatformNotSupportedException($"Address family {address.AddressFamily} is not supported.");
-    }
-
-    private static bool AddAddressWithIfconfig(string interfaceName, IPAddress address, int prefixLength)
-    {
-        if (IsAddressAssigned(interfaceName, address))
-        {
-            return false;
-        }
-
-        if (address.AddressFamily == AddressFamily.InterNetwork)
-        {
-            RunIfconfig(interfaceName, "inet", $"{address}/{prefixLength}", "alias");
-        }
-        else
-        {
-            RunIfconfig(interfaceName, "inet6", address.ToString(), "prefixlen", prefixLength.ToString(), "alias");
-        }
-
-        return true;
-    }
-
-    private static void DeleteAddressWithIfconfig(string interfaceName, IPAddress address, int prefixLength)
-    {
-        if (!IsAddressAssigned(interfaceName, address))
-        {
-            return;
-        }
-
-        if (address.AddressFamily == AddressFamily.InterNetwork)
-        {
-            RunIfconfig(interfaceName, "inet", $"{address}/{prefixLength}", "-alias");
-        }
-        else
-        {
-            RunIfconfig(interfaceName, "inet6", $"{address}/{prefixLength}", "-alias");
-        }
-    }
-
-    private static bool IsAddressAssigned(string interfaceName, IPAddress address)
-    {
-        NetworkInterface[] networkInterfaces = NetworkInterface.GetAllNetworkInterfaces();
-        for (int networkInterfaceIndex = 0; networkInterfaceIndex < networkInterfaces.Length; networkInterfaceIndex++)
-        {
-            NetworkInterface networkInterface = networkInterfaces[networkInterfaceIndex];
-            if (!string.Equals(networkInterface.Name, interfaceName, StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            foreach (UnicastIPAddressInformation addressInformation in networkInterface.GetIPProperties().UnicastAddresses)
-            {
-                if (addressInformation.Address.Equals(address))
-                {
-                    return true;
-                }
-            }
-        }
-
-        return false;
-    }
-
-    private static void RunIfconfig(string interfaceName, params string[] arguments)
-    {
-        ProcessStartInfo startInfo = new()
-        {
-            FileName = "/sbin/ifconfig",
-            RedirectStandardError = true,
-            RedirectStandardOutput = true,
-        };
-        startInfo.ArgumentList.Add(interfaceName);
-        for (int argumentIndex = 0; argumentIndex < arguments.Length; argumentIndex++)
-        {
-            startInfo.ArgumentList.Add(arguments[argumentIndex]);
-        }
-
-        using Process process = Process.Start(startInfo) ?? throw new InvalidOperationException("Could not start /sbin/ifconfig.");
-        string standardOutput = process.StandardOutput.ReadToEnd();
-        string standardError = process.StandardError.ReadToEnd();
-        process.WaitForExit();
-
-        if (process.ExitCode != 0)
-        {
-            string details = string.IsNullOrWhiteSpace(standardError) ? standardOutput : standardError;
-            throw new InvalidOperationException($"ifconfig failed with exit code {process.ExitCode}: {details.Trim()}");
-        }
     }
 
     private static bool AddAddressIpv4(string interfaceName, IPAddress address, int prefixLength)
