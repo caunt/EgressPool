@@ -1,6 +1,5 @@
 using System.Buffers.Binary;
 using System.ComponentModel;
-using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
@@ -12,21 +11,21 @@ internal static class MacOsNetworkNative
     private const int AfInet = 2;
     private const int AfInet6 = 30;
     private const int SockDgram = 2;
-    private static readonly ulong Siocaifaddr = Iow('i', 26, Marshal.SizeOf<IfAliasRequestIpv4>());
-    private static readonly ulong Siocdifaddr = Iow('i', 25, Marshal.SizeOf<IfRequestIpv4>());
-    private static readonly ulong SiocaifaddrIn6 = Iow('i', 26, Marshal.SizeOf<IfAliasRequestIpv6>());
-    private static readonly ulong SiocdifaddrIn6 = Iow('i', 25, Marshal.SizeOf<IfRequestIpv6>());
+    private const int InterfaceNameSize = 16;
+    private const int SockaddrInSize = 16;
+    private const int SockaddrIn6Size = 28;
+    private const int IfAliasRequestIpv4Size = 64;
+    private const int IfRequestIpv4Size = 32;
+    private const int IfAliasRequestIpv6Size = 128;
+    private const int IfRequestIpv6Size = 288;
+    private static readonly ulong Siocaifaddr = Iow('i', 26, IfAliasRequestIpv4Size);
+    private static readonly ulong Siocdifaddr = Iow('i', 25, IfRequestIpv4Size);
+    private static readonly ulong SiocaifaddrIn6 = Iow('i', 26, IfAliasRequestIpv6Size);
+    private static readonly ulong SiocdifaddrIn6 = Iow('i', 25, IfRequestIpv6Size);
     private const int ErrnoExists = 17;
     private const int ErrnoAddressNotAvailable = 49;
     private const uint InfiniteLifetime = 0xFFFFFFFF;
     private const ulong IocIn = 0x80000000;
-
-    static MacOsNetworkNative()
-    {
-        Debug.Assert(Marshal.SizeOf<SockaddrIn6>() == 28);
-        Debug.Assert(Marshal.SizeOf<IfAliasRequestIpv6>() == 128);
-        Debug.Assert(Marshal.SizeOf<IfRequestIpv6>() == 288);
-    }
 
     internal static bool AddAddress(string interfaceName, IPAddress address, int prefixLength)
     {
@@ -60,7 +59,7 @@ internal static class MacOsNetworkNative
         throw new PlatformNotSupportedException($"Address family {address.AddressFamily} is not supported.");
     }
 
-    private static bool AddAddressIpv4(string interfaceName, IPAddress address, int prefixLength)
+    private static unsafe bool AddAddressIpv4(string interfaceName, IPAddress address, int prefixLength)
     {
         int socketFileDescriptor = Socket(AfInet, SockDgram, 0);
         if (socketFileDescriptor < 0)
@@ -70,20 +69,24 @@ internal static class MacOsNetworkNative
 
         try
         {
-            IfAliasRequestIpv4 request = IfAliasRequestIpv4.Create(interfaceName, address, prefixLength);
-            int result = IoctlAdd(socketFileDescriptor, Siocaifaddr, ref request);
-            if (result == 0)
+            var request = (stackalloc byte[IfAliasRequestIpv4Size]);
+            BuildAddAddressIpv4Request(request, interfaceName, address, prefixLength);
+            fixed (byte* requestPointer = request)
             {
-                return true;
-            }
+                int result = Ioctl(socketFileDescriptor, Siocaifaddr, requestPointer);
+                if (result == 0)
+                {
+                    return true;
+                }
 
-            int errno = Marshal.GetLastPInvokeError();
-            if (errno == ErrnoExists)
-            {
-                return false;
-            }
+                int errno = Marshal.GetLastPInvokeError();
+                if (errno == ErrnoExists)
+                {
+                    return false;
+                }
 
-            throw CreateIoctlException(errno, $"Could not add address {address}/{prefixLength} to interface '{interfaceName}'.");
+                throw CreateIoctlException(errno, $"Could not add address {address}/{prefixLength} to interface '{interfaceName}'.");
+            }
         }
         finally
         {
@@ -91,7 +94,7 @@ internal static class MacOsNetworkNative
         }
     }
 
-    private static void DeleteAddressIpv4(string interfaceName, IPAddress address, int prefixLength)
+    private static unsafe void DeleteAddressIpv4(string interfaceName, IPAddress address, int prefixLength)
     {
         int socketFileDescriptor = Socket(AfInet, SockDgram, 0);
         if (socketFileDescriptor < 0)
@@ -101,17 +104,21 @@ internal static class MacOsNetworkNative
 
         try
         {
-            IfRequestIpv4 request = IfRequestIpv4.Create(interfaceName, address);
-            int result = IoctlDelete(socketFileDescriptor, Siocdifaddr, ref request);
-            if (result == 0)
+            var request = (stackalloc byte[IfRequestIpv4Size]);
+            BuildDeleteAddressIpv4Request(request, interfaceName, address);
+            fixed (byte* requestPointer = request)
             {
-                return;
-            }
+                int result = Ioctl(socketFileDescriptor, Siocdifaddr, requestPointer);
+                if (result == 0)
+                {
+                    return;
+                }
 
-            int errno = Marshal.GetLastPInvokeError();
-            if (errno != ErrnoAddressNotAvailable)
-            {
-                throw CreateIoctlException(errno, $"Could not delete address {address}/{prefixLength} from interface '{interfaceName}'.");
+                int errno = Marshal.GetLastPInvokeError();
+                if (errno != ErrnoAddressNotAvailable)
+                {
+                    throw CreateIoctlException(errno, $"Could not delete address {address}/{prefixLength} from interface '{interfaceName}'.");
+                }
             }
         }
         finally
@@ -120,7 +127,7 @@ internal static class MacOsNetworkNative
         }
     }
 
-    private static bool AddAddressIpv6(string interfaceName, IPAddress address, int prefixLength)
+    private static unsafe bool AddAddressIpv6(string interfaceName, IPAddress address, int prefixLength)
     {
         int socketFileDescriptor = Socket(AfInet6, SockDgram, 0);
         if (socketFileDescriptor < 0)
@@ -130,20 +137,24 @@ internal static class MacOsNetworkNative
 
         try
         {
-            IfAliasRequestIpv6 request = IfAliasRequestIpv6.Create(interfaceName, address, prefixLength);
-            int result = IoctlAddIpv6(socketFileDescriptor, SiocaifaddrIn6, ref request);
-            if (result == 0)
+            var request = (stackalloc byte[IfAliasRequestIpv6Size]);
+            BuildAddAddressIpv6Request(request, interfaceName, address, prefixLength);
+            fixed (byte* requestPointer = request)
             {
-                return true;
-            }
+                int result = Ioctl(socketFileDescriptor, SiocaifaddrIn6, requestPointer);
+                if (result == 0)
+                {
+                    return true;
+                }
 
-            int errno = Marshal.GetLastPInvokeError();
-            if (errno == ErrnoExists)
-            {
-                return false;
-            }
+                int errno = Marshal.GetLastPInvokeError();
+                if (errno == ErrnoExists)
+                {
+                    return false;
+                }
 
-            throw CreateIoctlException(errno, $"Could not add address {address}/{prefixLength} to interface '{interfaceName}'.");
+                throw CreateIoctlException(errno, $"Could not add address {address}/{prefixLength} to interface '{interfaceName}'.");
+            }
         }
         finally
         {
@@ -151,7 +162,7 @@ internal static class MacOsNetworkNative
         }
     }
 
-    private static void DeleteAddressIpv6(string interfaceName, IPAddress address, int prefixLength)
+    private static unsafe void DeleteAddressIpv6(string interfaceName, IPAddress address, int prefixLength)
     {
         int socketFileDescriptor = Socket(AfInet6, SockDgram, 0);
         if (socketFileDescriptor < 0)
@@ -161,17 +172,21 @@ internal static class MacOsNetworkNative
 
         try
         {
-            IfRequestIpv6 request = IfRequestIpv6.Create(interfaceName, address);
-            int result = IoctlDeleteIpv6(socketFileDescriptor, SiocdifaddrIn6, ref request);
-            if (result == 0)
+            var request = (stackalloc byte[IfRequestIpv6Size]);
+            BuildDeleteAddressIpv6Request(request, interfaceName, address);
+            fixed (byte* requestPointer = request)
             {
-                return;
-            }
+                int result = Ioctl(socketFileDescriptor, SiocdifaddrIn6, requestPointer);
+                if (result == 0)
+                {
+                    return;
+                }
 
-            int errno = Marshal.GetLastPInvokeError();
-            if (errno != ErrnoAddressNotAvailable)
-            {
-                throw CreateIoctlException(errno, $"Could not delete address {address}/{prefixLength} from interface '{interfaceName}'.");
+                int errno = Marshal.GetLastPInvokeError();
+                if (errno != ErrnoAddressNotAvailable)
+                {
+                    throw CreateIoctlException(errno, $"Could not delete address {address}/{prefixLength} from interface '{interfaceName}'.");
+                }
             }
         }
         finally
@@ -180,72 +195,133 @@ internal static class MacOsNetworkNative
         }
     }
 
-    private static SockaddrIn CreateSockaddr(IPAddress address)
+    internal static int BuildAddAddressIpv4Request(Span<byte> requestBuffer, string interfaceName, IPAddress address, int prefixLength)
     {
+        ValidateRequestBuffer(requestBuffer, IfAliasRequestIpv4Size);
+        requestBuffer[..IfAliasRequestIpv4Size].Clear();
+        WriteInterfaceName(requestBuffer, interfaceName);
+        WriteSockaddrIn(requestBuffer[16..], address, AfInet);
+        WriteIpv4Mask(requestBuffer[48..], prefixLength);
+        return IfAliasRequestIpv4Size;
+    }
+
+    internal static int BuildDeleteAddressIpv4Request(Span<byte> requestBuffer, string interfaceName, IPAddress address)
+    {
+        ValidateRequestBuffer(requestBuffer, IfRequestIpv4Size);
+        requestBuffer[..IfRequestIpv4Size].Clear();
+        WriteInterfaceName(requestBuffer, interfaceName);
+        WriteSockaddrIn(requestBuffer[16..], address, AfInet);
+        return IfRequestIpv4Size;
+    }
+
+    internal static int BuildAddAddressIpv6Request(Span<byte> requestBuffer, string interfaceName, IPAddress address, int prefixLength)
+    {
+        ValidateRequestBuffer(requestBuffer, IfAliasRequestIpv6Size);
+        requestBuffer[..IfAliasRequestIpv6Size].Clear();
+        WriteInterfaceName(requestBuffer, interfaceName);
+        WriteSockaddrIn6(requestBuffer[16..], address, AfInet6);
+        WriteIpv6Mask(requestBuffer[72..], prefixLength);
+        BinaryPrimitives.WriteUInt32LittleEndian(requestBuffer[120..], InfiniteLifetime);
+        BinaryPrimitives.WriteUInt32LittleEndian(requestBuffer[124..], InfiniteLifetime);
+        return IfAliasRequestIpv6Size;
+    }
+
+    internal static int BuildDeleteAddressIpv6Request(Span<byte> requestBuffer, string interfaceName, IPAddress address)
+    {
+        ValidateRequestBuffer(requestBuffer, IfRequestIpv6Size);
+        requestBuffer[..IfRequestIpv6Size].Clear();
+        WriteInterfaceName(requestBuffer, interfaceName);
+        WriteSockaddrIn6(requestBuffer[16..], address, AfInet6);
+        return IfRequestIpv6Size;
+    }
+
+    private static void ValidateRequestBuffer(Span<byte> requestBuffer, int requiredLength)
+    {
+        if (requestBuffer.Length < requiredLength)
+        {
+            throw new ArgumentException($"The request buffer must be at least {requiredLength} bytes.", nameof(requestBuffer));
+        }
+    }
+
+    private static void WriteInterfaceName(Span<byte> requestBuffer, string interfaceName)
+    {
+        if (string.IsNullOrWhiteSpace(interfaceName))
+        {
+            throw new ArgumentException("An interface name is required.", nameof(interfaceName));
+        }
+
+        Span<byte> nameBytes = requestBuffer[..InterfaceNameSize];
+        nameBytes.Clear();
+        for (int charIndex = 0; charIndex < interfaceName.Length; charIndex++)
+        {
+            char character = interfaceName[charIndex];
+            if (character > sbyte.MaxValue)
+            {
+                throw new ArgumentException($"Interface name '{interfaceName}' must contain only ASCII characters.", nameof(interfaceName));
+            }
+
+            if (charIndex >= InterfaceNameSize - 1)
+            {
+                throw new ArgumentException($"Interface name '{interfaceName}' must be shorter than {InterfaceNameSize} bytes.", nameof(interfaceName));
+            }
+
+            nameBytes[charIndex] = (byte)character;
+        }
+    }
+
+    private static void WriteSockaddrIn(Span<byte> destination, IPAddress address, byte family)
+    {
+        ValidateRequestBuffer(destination, SockaddrInSize);
         var addressBytes = (stackalloc byte[4]);
         if (!address.TryWriteBytes(addressBytes, out int addressByteCount) || addressByteCount != 4)
         {
             throw new InvalidOperationException($"Could not write IPv4 address bytes for {address}.");
         }
 
-        return new SockaddrIn
-        {
-            Length = 16,
-            Family = AfInet,
-            Address = BinaryPrimitives.ReadUInt32LittleEndian(addressBytes),
-        };
+        destination[..SockaddrInSize].Clear();
+        destination[0] = SockaddrInSize;
+        destination[1] = family;
+        addressBytes.CopyTo(destination[4..]);
     }
 
-    private static SockaddrIn CreateMask(int prefixLength)
+    private static void WriteIpv4Mask(Span<byte> destination, int prefixLength)
     {
+        ValidatePrefixLength(prefixLength, 32);
+        ValidateRequestBuffer(destination, SockaddrInSize);
+        destination[..SockaddrInSize].Clear();
+        destination[0] = SockaddrInSize;
         var maskBytes = (stackalloc byte[4]);
-        int fullByteCount = prefixLength / 8;
-        int remainingBitCount = prefixLength % 8;
-
-        for (int byteIndex = 0; byteIndex < fullByteCount; byteIndex++)
-        {
-            maskBytes[byteIndex] = 0xFF;
-        }
-
-        if (remainingBitCount > 0 && fullByteCount < maskBytes.Length)
-        {
-            maskBytes[fullByteCount] = (byte)(0xFF << (8 - remainingBitCount));
-        }
-
-        return new SockaddrIn
-        {
-            Length = 16,
-            Family = AfInet,
-            Address = BinaryPrimitives.ReadUInt32LittleEndian(maskBytes),
-        };
+        WritePrefixMask(maskBytes, prefixLength);
+        maskBytes.CopyTo(destination[4..]);
     }
 
-    private static SockaddrIn6 CreateSockaddrIpv6(IPAddress address)
+    private static void WriteSockaddrIn6(Span<byte> destination, IPAddress address, byte family)
     {
-        byte[] addressBytes = new byte[16];
-        if (!address.TryWriteBytes(addressBytes, out int addressByteCount) || addressByteCount != addressBytes.Length)
+        ValidateRequestBuffer(destination, SockaddrIn6Size);
+        var addressBytes = (stackalloc byte[16]);
+        if (!address.TryWriteBytes(addressBytes, out int addressByteCount) || addressByteCount != 16)
         {
             throw new InvalidOperationException($"Could not write IPv6 address bytes for {address}.");
         }
 
-        return new SockaddrIn6
-        {
-            Length = 28,
-            Family = AfInet6,
-            Address = addressBytes,
-            ScopeId = checked((uint)address.ScopeId),
-        };
+        destination[..SockaddrIn6Size].Clear();
+        destination[0] = SockaddrIn6Size;
+        destination[1] = family;
+        addressBytes.CopyTo(destination[8..]);
+        BinaryPrimitives.WriteUInt32LittleEndian(destination[24..], checked((uint)address.ScopeId));
     }
 
-    private static SockaddrIn6 CreateUnspecifiedSockaddrIpv6() =>
-        new()
-        {
-            Address = new byte[16],
-        };
-
-    private static SockaddrIn6 CreateMaskIpv6(int prefixLength)
+    private static void WriteIpv6Mask(Span<byte> destination, int prefixLength)
     {
-        byte[] maskBytes = new byte[16];
+        ValidatePrefixLength(prefixLength, 128);
+        ValidateRequestBuffer(destination, SockaddrIn6Size);
+        destination[..SockaddrIn6Size].Clear();
+        destination[0] = SockaddrIn6Size;
+        WritePrefixMask(destination[8..24], prefixLength);
+    }
+
+    private static void WritePrefixMask(Span<byte> maskBytes, int prefixLength)
+    {
         int fullByteCount = prefixLength / 8;
         int remainingBitCount = prefixLength % 8;
 
@@ -258,12 +334,14 @@ internal static class MacOsNetworkNative
         {
             maskBytes[fullByteCount] = (byte)(0xFF << (8 - remainingBitCount));
         }
+    }
 
-        return new SockaddrIn6
+    private static void ValidatePrefixLength(int prefixLength, int maxPrefixLength)
+    {
+        if (prefixLength < 0 || prefixLength > maxPrefixLength)
         {
-            Length = 28,
-            Address = maskBytes,
-        };
+            throw new ArgumentOutOfRangeException(nameof(prefixLength), prefixLength, $"Prefix length must be between 0 and {maxPrefixLength}.");
+        }
     }
 
     private static Win32Exception CreateIoctlException(int errno, string message)
@@ -282,129 +360,5 @@ internal static class MacOsNetworkNative
     private static extern int Close(int socketFileDescriptor);
 
     [DllImport("libc", EntryPoint = "ioctl", SetLastError = true)]
-    private static extern int IoctlAdd(int socketFileDescriptor, ulong request, ref IfAliasRequestIpv4 argument);
-
-    [DllImport("libc", EntryPoint = "ioctl", SetLastError = true)]
-    private static extern int IoctlDelete(int socketFileDescriptor, ulong request, ref IfRequestIpv4 argument);
-
-    [DllImport("libc", EntryPoint = "ioctl", SetLastError = true)]
-    private static extern int IoctlAddIpv6(int socketFileDescriptor, ulong request, ref IfAliasRequestIpv6 argument);
-
-    [DllImport("libc", EntryPoint = "ioctl", SetLastError = true)]
-    private static extern int IoctlDeleteIpv6(int socketFileDescriptor, ulong request, ref IfRequestIpv6 argument);
-
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi)]
-    private struct IfAliasRequestIpv4
-    {
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 16)]
-        internal string Name;
-
-        internal SockaddrIn Address;
-        internal SockaddrIn BroadcastAddress;
-        internal SockaddrIn Mask;
-
-        internal static IfAliasRequestIpv4 Create(string interfaceName, IPAddress address, int prefixLength) =>
-            new()
-            {
-                Name = interfaceName,
-                Address = CreateSockaddr(address),
-                BroadcastAddress = default,
-                Mask = CreateMask(prefixLength),
-        };
-    }
-
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi, Pack = 4, Size = 128)]
-    private struct IfAliasRequestIpv6
-    {
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 16)]
-        internal string Name;
-
-        internal SockaddrIn6 Address;
-        internal SockaddrIn6 DestinationAddress;
-        internal SockaddrIn6 PrefixMask;
-        internal int Flags;
-        internal AddressLifetimeIpv6 Lifetime;
-
-        internal static IfAliasRequestIpv6 Create(string interfaceName, IPAddress address, int prefixLength) =>
-            new()
-            {
-                Name = interfaceName,
-                Address = CreateSockaddrIpv6(address),
-                DestinationAddress = CreateUnspecifiedSockaddrIpv6(),
-                PrefixMask = CreateMaskIpv6(prefixLength),
-                Lifetime = AddressLifetimeIpv6.Infinite,
-            };
-    }
-
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi)]
-    private struct IfRequestIpv4
-    {
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 16)]
-        internal string Name;
-
-        internal SockaddrIn Address;
-
-        internal static IfRequestIpv4 Create(string interfaceName, IPAddress address) =>
-            new()
-            {
-                Name = interfaceName,
-                Address = CreateSockaddr(address),
-        };
-    }
-
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi, Pack = 4, Size = 288)]
-    private struct IfRequestIpv6
-    {
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 16)]
-        internal string Name;
-
-        internal SockaddrIn6 Address;
-
-        internal static IfRequestIpv6 Create(string interfaceName, IPAddress address) =>
-            new()
-            {
-                Name = interfaceName,
-                Address = CreateSockaddrIpv6(address),
-            };
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct SockaddrIn
-    {
-        internal byte Length;
-        internal byte Family;
-        internal ushort Port;
-        internal uint Address;
-        internal ulong Zero;
-    }
-
-    [StructLayout(LayoutKind.Sequential, Pack = 4)]
-    private struct SockaddrIn6
-    {
-        internal byte Length;
-        internal byte Family;
-        internal ushort Port;
-        internal uint FlowInfo;
-
-        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 16)]
-        internal byte[]? Address;
-
-        internal uint ScopeId;
-    }
-
-    [StructLayout(LayoutKind.Sequential, Pack = 4)]
-    private struct AddressLifetimeIpv6
-    {
-        internal long Expire;
-        internal long Preferred;
-        internal uint ValidLifetime;
-        internal uint PreferredLifetime;
-
-        internal static AddressLifetimeIpv6 Infinite =>
-            new()
-            {
-                ValidLifetime = InfiniteLifetime,
-                PreferredLifetime = InfiniteLifetime,
-            };
-    }
+    private static unsafe extern int Ioctl(int socketFileDescriptor, ulong request, void* argument);
 }
