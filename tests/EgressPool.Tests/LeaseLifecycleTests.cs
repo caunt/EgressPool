@@ -26,7 +26,7 @@ public sealed class LeaseLifecycleTests
         EgressPoolOptions options = TestOptions.Create(
             EgressAddressMode.AssignOnDemand,
             EgressInterfaceSelectionMode.Explicit,
-            [IPNetwork.Parse("127.64.0.0/16")]);
+            [IPNetwork.Parse("127.0.0.1/32")]);
 
         using EgressPool pool = EgressPool.CreateForTests(options, platform);
         using EgressUdpClient udpClient = pool.CreateUdpClient();
@@ -105,7 +105,7 @@ public sealed class LeaseLifecycleTests
         EgressPoolOptions options = TestOptions.Create(
             EgressAddressMode.NonLocalBind,
             EgressInterfaceSelectionMode.Explicit,
-            [IPNetwork.Parse("127.64.0.0/16")]);
+            [IPNetwork.Parse("127.0.0.1/32")]);
 
         using EgressPool pool = EgressPool.CreateForTests(options, platform);
         using EgressUdpClient udpClient = pool.CreateUdpClient();

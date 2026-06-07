@@ -1,21 +1,15 @@
 # EgressPool
 
-Small .NET 10 library for distributing outbound TCP, UDP, and HTTP connections across configured IPv4 or IPv6 source prefixes.
+EgressPool is a .NET library for sending outbound TCP, UDP, and HTTP traffic from a configured pool of source IP addresses.
 
-## Projects
+Use it when an application needs its outbound connections to appear from different local addresses while keeping the calling code simple.
 
-- `src/EgressPool` - core library.
-- `src/EgressPool.DependencyInjection` - `IServiceCollection` and `IHttpClientFactory` integration.
-- `samples/EgressPool.Sample` - minimal loopback HTTP sample.
-- `tests/EgressPool.Tests` - unit and behavioral tests.
+## What You Can Do
 
-## Features
-
-- TCP, UDP, and HTTP egress address selection.
-- HTTP integration through `SocketsHttpHandler.ConnectCallback`.
-- Address modes: `NonLocalBind`, `AssignOnDemand`, and `PreAssignedOnly`.
-- Interface selection: explicit, default route, per-destination route, or custom callback.
-- Cleanup tracking for addresses and routes created by the library.
+- Configure one or more IPv4 or IPv6 prefixes.
+- Create TCP, UDP, or HTTP clients that use addresses from those prefixes.
+- Reuse the same pool across many outbound requests.
+- Release addresses by disposing the clients, sockets, leases, or pool you create.
 
 ## Quick Start
 
@@ -26,10 +20,6 @@ using Egress;
 EgressPoolOptions options = new()
 {
     Prefixes = [IPNetwork.Parse("127.0.0.0/8")],
-    AddressMode = EgressAddressMode.NonLocalBind,
-    InterfaceSelectionMode = EgressInterfaceSelectionMode.Explicit,
-    InterfaceName = "lo",
-    ManageLocalRoutes = false,
 };
 
 await using EgressPool pool = await EgressPool.CreateAsync(options);
@@ -38,27 +28,21 @@ using HttpClient client = pool.CreateHttpClient();
 string response = await client.GetStringAsync("http://127.0.0.1:5000/");
 ```
 
-## Commands
+## Expected Behavior
 
-```bash
-dotnet build EgressPool.slnx
-dotnet test EgressPool.slnx
-dotnet run --project samples/EgressPool.Sample/EgressPool.Sample.csproj
-```
+Each outbound connection receives a source address from the configured pool. When the connection, client, or pool is disposed, the address is no longer held by that caller.
 
-Coverage:
-
-```bash
-dotnet test EgressPool.slnx --collect:"XPlat Code Coverage"
-```
-
-## Platform Notes
-
-`NonLocalBind` fast mode is Linux-specific. `AssignOnDemand` modifies OS network configuration and may require elevated privileges. Tests avoid privileged network changes and use loopback plus fake platform behavior.
+Some configurations may require operating system support or elevated permissions. If the requested behavior is not available on the current machine, pool creation or connection creation fails with an exception.
 
 ## Cleanup
 
-The library removes owned addresses and routes when leases, sockets, handlers, clients, or pools are disposed. Stale owned state can be recovered with:
+Dispose the pool when the application is finished with it:
+
+```csharp
+await pool.DisposeAsync();
+```
+
+If an application exits unexpectedly, release anything left behind by a previous process:
 
 ```csharp
 await EgressPool.CleanupStaleStateAsync();
