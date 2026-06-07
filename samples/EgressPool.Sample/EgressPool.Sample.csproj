@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\EgressPool\EgressPool.csproj" />
+    <ProjectReference Include="..\..\src\EgressPool.DependencyInjection\EgressPool.DependencyInjection.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+
+</Project>
