@@ -1,6 +1,5 @@
 using System.Net;
 using System.Net.Http;
-using System.Reflection;
 using Egress.Internal;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -13,7 +12,16 @@ public sealed class DependencyInjectionBehaviorTests
     {
         ServiceCollection services = new();
         EgressPoolOptions options = BehaviorTestHelpers.CreatePreAssignedLoopbackOptions();
-        services.AddEgressPool(configuredOptions => CopyOptions(options, configuredOptions));
+        services.AddEgressPool(configuredOptions =>
+        {
+            configuredOptions.Prefixes = options.Prefixes;
+            configuredOptions.AddressMode = options.AddressMode;
+            configuredOptions.InterfaceSelectionMode = options.InterfaceSelectionMode;
+            configuredOptions.InterfaceName = options.InterfaceName;
+            configuredOptions.DefaultAddressFamily = options.DefaultAddressFamily;
+            configuredOptions.ManageLocalRoutes = options.ManageLocalRoutes;
+            configuredOptions.Cleanup = options.Cleanup;
+        });
 
         using ServiceProvider serviceProvider = services.BuildServiceProvider();
         EgressPool firstPool = serviceProvider.GetRequiredService<EgressPool>();
@@ -49,13 +57,4 @@ public sealed class DependencyInjectionBehaviorTests
         Assert.Single(platform.AssignedAddressRequests);
     }
 
-    private static void CopyOptions(EgressPoolOptions source, EgressPoolOptions destination)
-    {
-        PropertyInfo[] properties = typeof(EgressPoolOptions).GetProperties(BindingFlags.Instance | BindingFlags.Public);
-        for (int propertyIndex = 0; propertyIndex < properties.Length; propertyIndex++)
-        {
-            PropertyInfo property = properties[propertyIndex];
-            property.SetValue(destination, property.GetValue(source));
-        }
-    }
 }

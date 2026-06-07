@@ -58,6 +58,8 @@ internal sealed class FakeEgressNetworkPlatform : IEgressNetworkPlatform
 
     internal bool ReturnNotCreatedLocalRouteLease { get; init; }
 
+    internal Action? BeforeAddAddressReturns { get; set; }
+
     public void EnableNonLocalBind(Socket socket, AddressFamily addressFamily)
     {
         EnableNonLocalBindCallCount++;
@@ -122,9 +124,11 @@ internal sealed class FakeEgressNetworkPlatform : IEgressNetworkPlatform
 
         if (ReturnNotCreatedAddressLease)
         {
+            BeforeAddAddressReturns?.Invoke();
             return PlatformNetworkStateLease.NotCreated;
         }
 
+        BeforeAddAddressReturns?.Invoke();
         return new PlatformNetworkStateLease(true, new ActionDisposable(() => DeleteAddress(operation)));
     }
 
