@@ -359,6 +359,6 @@ internal static class MacOsNetworkNative
     [DllImport("libc", EntryPoint = "close", SetLastError = true)]
     private static extern int Close(int socketFileDescriptor);
 
-    [DllImport("libc", EntryPoint = "ioctl", SetLastError = true)]
+    [DllImport("libc", EntryPoint = "__ioctl", SetLastError = true)]
     private static unsafe extern int Ioctl(int socketFileDescriptor, ulong request, void* argument);
 }
