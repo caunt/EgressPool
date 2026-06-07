@@ -83,7 +83,7 @@ internal static class MacOsNetworkNative
                 return false;
             }
 
-            throw new Win32Exception(errno, $"Could not add address {address}/{prefixLength} to interface '{interfaceName}'.");
+            throw CreateIoctlException(errno, $"Could not add address {address}/{prefixLength} to interface '{interfaceName}'.");
         }
         finally
         {
@@ -111,7 +111,7 @@ internal static class MacOsNetworkNative
             int errno = Marshal.GetLastPInvokeError();
             if (errno != ErrnoAddressNotAvailable)
             {
-                throw new Win32Exception(errno, $"Could not delete address {address}/{prefixLength} from interface '{interfaceName}'.");
+                throw CreateIoctlException(errno, $"Could not delete address {address}/{prefixLength} from interface '{interfaceName}'.");
             }
         }
         finally
@@ -143,7 +143,7 @@ internal static class MacOsNetworkNative
                 return false;
             }
 
-            throw new Win32Exception(errno, $"Could not add address {address}/{prefixLength} to interface '{interfaceName}'.");
+            throw CreateIoctlException(errno, $"Could not add address {address}/{prefixLength} to interface '{interfaceName}'.");
         }
         finally
         {
@@ -171,7 +171,7 @@ internal static class MacOsNetworkNative
             int errno = Marshal.GetLastPInvokeError();
             if (errno != ErrnoAddressNotAvailable)
             {
-                throw new Win32Exception(errno, $"Could not delete address {address}/{prefixLength} from interface '{interfaceName}'.");
+                throw CreateIoctlException(errno, $"Could not delete address {address}/{prefixLength} from interface '{interfaceName}'.");
             }
         }
         finally
@@ -237,11 +237,9 @@ internal static class MacOsNetworkNative
         };
     }
 
-    private static SockaddrIn6 CreateEmptySockaddrIpv6() =>
+    private static SockaddrIn6 CreateUnspecifiedSockaddrIpv6() =>
         new()
         {
-            Length = 28,
-            Family = AfInet6,
             Address = new byte[16],
         };
 
@@ -264,9 +262,14 @@ internal static class MacOsNetworkNative
         return new SockaddrIn6
         {
             Length = 28,
-            Family = AfInet6,
             Address = maskBytes,
         };
+    }
+
+    private static Win32Exception CreateIoctlException(int errno, string message)
+    {
+        string errnoMessage = new Win32Exception(errno).Message;
+        return new Win32Exception(errno, $"{message} errno {errno}: {errnoMessage}");
     }
 
     private static ulong Iow(char group, int number, int size) =>
@@ -327,7 +330,7 @@ internal static class MacOsNetworkNative
             {
                 Name = interfaceName,
                 Address = CreateSockaddrIpv6(address),
-                DestinationAddress = CreateEmptySockaddrIpv6(),
+                DestinationAddress = CreateUnspecifiedSockaddrIpv6(),
                 PrefixMask = CreateMaskIpv6(prefixLength),
                 Lifetime = AddressLifetimeIpv6.Infinite,
             };
