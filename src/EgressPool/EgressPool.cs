@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http;
 using System.Net.Sockets;
+using System.Runtime.ExceptionServices;
 using System.Threading;
 using Egress.Internal;
 
@@ -17,6 +18,7 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
     private readonly OwnedNetworkStateStore stateStore;
     private readonly ConcurrentDictionary<IDisposable, byte> activeResources = [];
     private readonly List<IDisposable> localRouteLeases = [];
+    private readonly object lifecycleLock = new();
     private ProcessCleanupRegistration? processCleanupRegistration;
     private int disposed;
 
@@ -141,7 +143,7 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
 
                 EgressAddressLease lease = RentAddress(destinationAddress.AddressFamily, destinationAddress, trackStandaloneLease: false);
                 LeasedSocket socket = new(lease, this, destinationAddress.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
-                RegisterActive(socket);
+                RegisterActiveOrDispose(socket);
 
                 try
                 {
@@ -170,10 +172,12 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
             }
         }
 
-        throw new SocketException((int)SocketError.HostUnreachable)
+        if (lastException is not null)
         {
-            Source = lastException?.Source,
-        };
+            ExceptionDispatchInfo.Capture(lastException).Throw();
+        }
+
+        throw new SocketException((int)SocketError.HostUnreachable);
     }
 
     /// <summary>
@@ -195,7 +199,7 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
             socket.Bind(new IPEndPoint(lease.Address, 0));
 
             EgressUdpClient client = new(socket, lease, this);
-            RegisterActive(client);
+            RegisterActiveOrDispose(client);
             return client;
         }
         catch
@@ -223,25 +227,37 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
     /// <inheritdoc />
     public void Dispose()
     {
-        if (Interlocked.Exchange(ref disposed, 1) != 0)
+        ProcessCleanupRegistration? cleanupRegistration;
+        IDisposable[] activeResourcesSnapshot;
+        IDisposable[] localRouteLeasesSnapshot;
+
+        lock (lifecycleLock)
         {
-            return;
+            if (disposed != 0)
+            {
+                return;
+            }
+
+            Volatile.Write(ref disposed, 1);
+            cleanupRegistration = processCleanupRegistration;
+            processCleanupRegistration = null;
+            activeResourcesSnapshot = activeResources.Keys.ToArray();
+            localRouteLeasesSnapshot = localRouteLeases.ToArray();
+            localRouteLeases.Clear();
         }
 
-        processCleanupRegistration?.Dispose();
+        cleanupRegistration?.Dispose();
         List<Exception> exceptions = [];
 
-        foreach (IDisposable activeResource in activeResources.Keys)
+        foreach (IDisposable activeResource in activeResourcesSnapshot)
         {
             DisposeCollecting(activeResource, exceptions);
         }
 
-        for (int routeLeaseIndex = localRouteLeases.Count - 1; routeLeaseIndex >= 0; routeLeaseIndex--)
+        for (int routeLeaseIndex = localRouteLeasesSnapshot.Length - 1; routeLeaseIndex >= 0; routeLeaseIndex--)
         {
-            DisposeCollecting(localRouteLeases[routeLeaseIndex], exceptions);
+            DisposeCollecting(localRouteLeasesSnapshot[routeLeaseIndex], exceptions);
         }
-
-        localRouteLeases.Clear();
 
         if (exceptions.Count > 0)
         {
@@ -328,7 +344,7 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
         }
 
         EgressAddressLease lease = new(selectedAddress, interfaceName, leasePrefixLength, assignmentLease.Dispose, this);
-        RegisterActive(lease);
+        RegisterActiveOrDispose(lease);
         return lease;
     }
 
@@ -497,9 +513,19 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
         }
     }
 
-    private void RegisterActive(IDisposable activeResource)
+    private void RegisterActiveOrDispose(IDisposable activeResource)
     {
-        activeResources.TryAdd(activeResource, 0);
+        lock (lifecycleLock)
+        {
+            if (disposed == 0)
+            {
+                activeResources.TryAdd(activeResource, 0);
+                return;
+            }
+        }
+
+        activeResource.Dispose();
+        ThrowIfDisposed();
     }
 
     void IActiveResourceTracker.UnregisterActive(IDisposable activeResource) =>
@@ -664,23 +690,26 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
     private static EgressPoolOptions ValidateOptions(EgressPoolOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(options.Prefixes);
+        ArgumentNullException.ThrowIfNull(options.Cleanup);
 
         if (options.Prefixes.Count == 0)
         {
             throw new ArgumentException("At least one prefix is required.", nameof(options));
         }
 
-        foreach (IPNetwork prefix in options.Prefixes)
+        IPNetwork[] prefixes = new IPNetwork[options.Prefixes.Count];
+        for (int prefixIndex = 0; prefixIndex < options.Prefixes.Count; prefixIndex++)
         {
+            IPNetwork prefix = options.Prefixes[prefixIndex];
             ValidateAddressFamily(prefix.BaseAddress.AddressFamily);
+            prefixes[prefixIndex] = prefix;
         }
 
         if (options.DefaultAddressFamily is { } defaultAddressFamily)
         {
             ValidateAddressFamily(defaultAddressFamily);
         }
-
-        ArgumentNullException.ThrowIfNull(options.Cleanup);
 
         if (options.InterfaceSelectionMode == EgressInterfaceSelectionMode.Explicit && string.IsNullOrWhiteSpace(options.InterfaceName))
         {
@@ -697,7 +726,16 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
             throw new ArgumentException("LocalRouteInterfaceName is required when local route management is enabled.", nameof(options));
         }
 
-        return options;
+        return options with
+        {
+            Prefixes = prefixes,
+            Cleanup = new EgressCleanupOptions
+            {
+                EnableProcessExitCleanup = options.Cleanup.EnableProcessExitCleanup,
+                RecoverStaleOwnedStateOnCreate = options.Cleanup.RecoverStaleOwnedStateOnCreate,
+                StateDirectory = options.Cleanup.StateDirectory,
+            },
+        };
     }
 
     private static void ValidateAddressFamily(AddressFamily addressFamily)

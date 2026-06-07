@@ -78,7 +78,7 @@ public sealed class LeaseLifecycleTests
     }
 
     [Fact]
-    public async Task ConnectTcpAsync_WhenConnectFails_ReleasesAssignedAddress()
+    public async Task ConnectTcpAsync_WhenConnectFails_PreservesSocketFailureAndReleasesAssignedAddress()
     {
         FakeEgressNetworkPlatform platform = new();
         EgressPoolOptions options = TestOptions.Create(
@@ -89,8 +89,9 @@ public sealed class LeaseLifecycleTests
 
         using EgressPool pool = EgressPool.CreateForTests(options, platform);
 
-        await Assert.ThrowsAsync<SocketException>(async () => await pool.ConnectTcpAsync("127.0.0.1", unusedPort));
+        SocketException exception = await Assert.ThrowsAsync<SocketException>(async () => await pool.ConnectTcpAsync("127.0.0.1", unusedPort));
 
+        Assert.NotEqual(SocketError.HostUnreachable, exception.SocketErrorCode);
         Assert.Equal(1, platform.AddAddressCallCount);
         Assert.Equal(1, platform.DeleteAddressCallCount);
     }
@@ -116,6 +117,87 @@ public sealed class LeaseLifecycleTests
         udpClient.Dispose();
 
         Assert.Equal(1, platform.DeleteAddressCallCount);
+    }
+
+    [Fact]
+    public async Task RentAddressAsync_WhenPoolDisposedBeforeRegistration_DisposesLeaseAndThrowsObjectDisposedException()
+    {
+        FakeEgressNetworkPlatform platform = new();
+        EgressPoolOptions options = TestOptions.Create(
+            EgressAddressMode.AssignOnDemand,
+            EgressInterfaceSelectionMode.Explicit,
+            [IPNetwork.Parse("127.0.0.1/32")]);
+        EgressPool? pool = null;
+        platform.BeforeAddAddressReturns = () => pool!.Dispose();
+
+        try
+        {
+            pool = EgressPool.CreateForTests(options, platform);
+
+            await Assert.ThrowsAsync<ObjectDisposedException>(async () => await pool.RentAddressAsync());
+        }
+        finally
+        {
+            pool?.Dispose();
+        }
+
+        Assert.Equal(1, platform.AddAddressCallCount);
+        Assert.Equal(1, platform.DeleteAddressCallCount);
+        Assert.Equal(Assert.Single(platform.AddedAddresses), Assert.Single(platform.DeletedAddresses));
+    }
+
+    [Fact]
+    public void CreateUdpClient_WhenPoolDisposedBeforeRegistration_DisposesLeaseAndThrowsObjectDisposedException()
+    {
+        FakeEgressNetworkPlatform platform = new();
+        EgressPoolOptions options = TestOptions.Create(
+            EgressAddressMode.AssignOnDemand,
+            EgressInterfaceSelectionMode.Explicit,
+            [IPNetwork.Parse("127.0.0.1/32")]);
+        EgressPool? pool = null;
+        platform.BeforeAddAddressReturns = () => pool!.Dispose();
+
+        try
+        {
+            pool = EgressPool.CreateForTests(options, platform);
+
+            Assert.Throws<ObjectDisposedException>(() => pool.CreateUdpClient());
+        }
+        finally
+        {
+            pool?.Dispose();
+        }
+
+        Assert.Equal(1, platform.AddAddressCallCount);
+        Assert.Equal(1, platform.DeleteAddressCallCount);
+        Assert.Equal(Assert.Single(platform.AddedAddresses), Assert.Single(platform.DeletedAddresses));
+    }
+
+    [Fact]
+    public async Task ConnectTcpAsync_WhenPoolDisposedBeforeRegistration_DisposesLeaseAndThrowsObjectDisposedException()
+    {
+        FakeEgressNetworkPlatform platform = new();
+        EgressPoolOptions options = TestOptions.Create(
+            EgressAddressMode.AssignOnDemand,
+            EgressInterfaceSelectionMode.Explicit,
+            [IPNetwork.Parse("127.0.0.1/32")]);
+        EgressPool? pool = null;
+        platform.BeforeAddAddressReturns = () => pool!.Dispose();
+
+        try
+        {
+            pool = EgressPool.CreateForTests(options, platform);
+
+            await Assert.ThrowsAsync<ObjectDisposedException>(async () => await pool.ConnectTcpAsync("127.0.0.1", 1));
+        }
+        finally
+        {
+            pool?.Dispose();
+        }
+
+        Assert.Equal(1, platform.AddAddressCallCount);
+        Assert.Equal(1, platform.DeleteAddressCallCount);
+        Assert.Equal(Assert.Single(platform.AddedAddresses), Assert.Single(platform.DeletedAddresses));
     }
 
     private static int GetUnusedLoopbackPort()
