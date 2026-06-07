@@ -101,6 +101,94 @@ public sealed class AllocationReductionTests
     }
 
     [Fact]
+    public void BuildAddAddressIpv4Request_WritesExpectedMacOsIoctlRequest()
+    {
+        IPAddress address = IPAddress.Parse("198.18.1.2");
+        var request = (stackalloc byte[64]);
+        request.Fill(0xCC);
+
+        int requestLength = MacOsNetworkNative.BuildAddAddressIpv4Request(request, "lo0", address, 32);
+
+        Assert.Equal(64, requestLength);
+        AssertInterfaceName(request, "lo0");
+        Assert.Equal((byte)16, request[16]);
+        Assert.Equal((byte)2, request[17]);
+        Assert.Equal([198, 18, 1, 2], request[20..24].ToArray());
+        AssertZeroes(request[32..48]);
+        Assert.Equal((byte)16, request[48]);
+        Assert.Equal((byte)0, request[49]);
+        Assert.Equal([255, 255, 255, 255], request[52..56].ToArray());
+        AssertZeroes(request[56..64]);
+    }
+
+    [Fact]
+    public void BuildDeleteAddressIpv4Request_WritesExpectedMacOsIoctlRequest()
+    {
+        IPAddress address = IPAddress.Parse("198.18.1.2");
+        var request = (stackalloc byte[32]);
+        request.Fill(0xCC);
+
+        int requestLength = MacOsNetworkNative.BuildDeleteAddressIpv4Request(request, "lo0", address);
+
+        Assert.Equal(32, requestLength);
+        AssertInterfaceName(request, "lo0");
+        Assert.Equal((byte)16, request[16]);
+        Assert.Equal((byte)2, request[17]);
+        Assert.Equal([198, 18, 1, 2], request[20..24].ToArray());
+        AssertZeroes(request[24..32]);
+    }
+
+    [Fact]
+    public void BuildAddAddressIpv6Request_WritesExpectedMacOsIoctlRequest()
+    {
+        IPAddress address = IPAddress.Parse("fd7a:e677:ee50:514d::47");
+        var request = (stackalloc byte[128]);
+        request.Fill(0xCC);
+
+        int requestLength = MacOsNetworkNative.BuildAddAddressIpv6Request(request, "lo0", address, 128);
+
+        Assert.Equal(128, requestLength);
+        AssertInterfaceName(request, "lo0");
+        Assert.Equal((byte)28, request[16]);
+        Assert.Equal((byte)30, request[17]);
+        Assert.Equal([0xfd, 0x7a, 0xe6, 0x77, 0xee, 0x50, 0x51, 0x4d, 0, 0, 0, 0, 0, 0, 0, 0x47], request[24..40].ToArray());
+        AssertZeroes(request[40..44]);
+        AssertZeroes(request[44..72]);
+        Assert.Equal((byte)28, request[72]);
+        Assert.Equal((byte)0, request[73]);
+        Assert.Equal([255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255], request[80..96].ToArray());
+        AssertZeroes(request[96..120]);
+        Assert.Equal(uint.MaxValue, BinaryPrimitives.ReadUInt32LittleEndian(request[120..]));
+        Assert.Equal(uint.MaxValue, BinaryPrimitives.ReadUInt32LittleEndian(request[124..]));
+    }
+
+    [Fact]
+    public void BuildDeleteAddressIpv6Request_WritesExpectedMacOsIoctlRequest()
+    {
+        IPAddress address = IPAddress.Parse("fd7a:e677:ee50:514d::47");
+        var request = (stackalloc byte[288]);
+        request.Fill(0xCC);
+
+        int requestLength = MacOsNetworkNative.BuildDeleteAddressIpv6Request(request, "lo0", address);
+
+        Assert.Equal(288, requestLength);
+        AssertInterfaceName(request, "lo0");
+        Assert.Equal((byte)28, request[16]);
+        Assert.Equal((byte)30, request[17]);
+        Assert.Equal([0xfd, 0x7a, 0xe6, 0x77, 0xee, 0x50, 0x51, 0x4d, 0, 0, 0, 0, 0, 0, 0, 0x47], request[24..40].ToArray());
+        AssertZeroes(request[40..288]);
+    }
+
+    [Fact]
+    public void BuildMacOsIoctlRequest_InterfaceNameTooLong_Throws()
+    {
+        byte[] request = new byte[64];
+
+        Assert.Throws<ArgumentException>(() =>
+            MacOsNetworkNative.BuildAddAddressIpv4Request(request, "abcdefghijklmnop", IPAddress.Parse("198.18.1.2"), 32));
+    }
+
+    [Fact]
     public void NetlinkMessageBuilders_DoNotAllocateManagedHeap()
     {
         IPAddress address = IPAddress.Parse("203.0.113.9");
@@ -122,5 +210,23 @@ public sealed class AllocationReductionTests
         long allocatedBytes = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
 
         Assert.Equal(0, allocatedBytes);
+    }
+
+    private static void AssertInterfaceName(ReadOnlySpan<byte> request, string expectedName)
+    {
+        for (int charIndex = 0; charIndex < expectedName.Length; charIndex++)
+        {
+            Assert.Equal((byte)expectedName[charIndex], request[charIndex]);
+        }
+
+        AssertZeroes(request[expectedName.Length..16]);
+    }
+
+    private static void AssertZeroes(ReadOnlySpan<byte> bytes)
+    {
+        for (int byteIndex = 0; byteIndex < bytes.Length; byteIndex++)
+        {
+            Assert.Equal((byte)0, bytes[byteIndex]);
+        }
     }
 }
