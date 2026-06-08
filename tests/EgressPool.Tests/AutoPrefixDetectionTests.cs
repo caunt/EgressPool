@@ -65,6 +65,65 @@ public sealed class AutoPrefixDetectionTests
     }
 
     [Fact]
+    public async Task RentAddressAsync_DestinationAddress_SingleConfiguredPrefixBypassesScopeFiltering()
+    {
+        FakeEgressNetworkPlatform platform = new();
+        IPAddress configuredAddress = IPAddress.Parse("203.0.113.10");
+        EgressPoolOptions options = TestOptions.Create(
+            EgressAddressMode.AssignOnDemand,
+            EgressInterfaceSelectionMode.Explicit,
+            [new IPNetwork(configuredAddress, 32)]) with
+        {
+            ManageLocalRoutes = false,
+        };
+
+        using EgressPool pool = EgressPool.CreateForTests(options, platform);
+        await using EgressAddressLease lease = await pool.RentAddressAsync(IPAddress.Loopback);
+
+        Assert.Equal(configuredAddress, lease.Address);
+        Assert.Equal(configuredAddress, Assert.Single(platform.AddedAddresses).Address);
+    }
+
+    [Fact]
+    public async Task RentAddressAsync_DestinationAddress_PreAssignedSingleConfiguredPrefixBypassesScopeFiltering()
+    {
+        FakeEgressNetworkPlatform platform = new();
+        IPAddress configuredAddress = IPAddress.Parse("203.0.113.10");
+        platform.AssignedAddresses.Add(new NetworkInterfaceAddress(configuredAddress, 32));
+        EgressPoolOptions options = TestOptions.Create(
+            EgressAddressMode.PreAssignedOnly,
+            EgressInterfaceSelectionMode.Explicit,
+            [new IPNetwork(configuredAddress, 32)]);
+
+        using EgressPool pool = EgressPool.CreateForTests(options, platform);
+        await using EgressAddressLease lease = await pool.RentAddressAsync(IPAddress.Loopback);
+
+        Assert.Equal(configuredAddress, lease.Address);
+        Assert.Equal(0, platform.AddAddressCallCount);
+    }
+
+    [Fact]
+    public async Task RentAddressAsync_DestinationAddress_MultipleConfiguredPrefixesWithoutMatchingScope_ThrowsClearMessage()
+    {
+        FakeEgressNetworkPlatform platform = new();
+        EgressPoolOptions options = TestOptions.Create(
+            EgressAddressMode.AssignOnDemand,
+            EgressInterfaceSelectionMode.Explicit,
+            [IPNetwork.Parse("203.0.113.0/24"), IPNetwork.Parse("198.18.0.0/15")]) with
+        {
+            ManageLocalRoutes = false,
+        };
+
+        using EgressPool pool = EgressPool.CreateForTests(options, platform);
+
+        InvalidOperationException exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            async () => await pool.RentAddressAsync(IPAddress.Loopback));
+
+        Assert.Contains("No InterNetwork egress prefix matches destination 127.0.0.1 with scope Loopback", exception.Message);
+        Assert.Equal(0, platform.AddAddressCallCount);
+    }
+
+    [Fact]
     public async Task RentAddressAsync_DestinationAddress_WhenProbeFails_ThrowsClearMessageAndReleasesLease()
     {
         FakeEgressNetworkPlatform platform = new();
@@ -117,7 +176,7 @@ public sealed class AutoPrefixDetectionTests
         EgressPoolOptions options = TestOptions.Create(
             EgressAddressMode.NonLocalBind,
             EgressInterfaceSelectionMode.Explicit,
-            [IPNetwork.Parse("127.0.0.1/32")]) with
+            [IPNetwork.Parse("127.0.0.1/32"), IPNetwork.Parse("203.0.113.0/24")]) with
         {
             ManageLocalRoutes = false,
         };

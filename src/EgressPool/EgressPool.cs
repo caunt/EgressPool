@@ -410,6 +410,14 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
             return new SelectedEgressAddress(selectedAddress, leasePrefixLength, prefix, assignmentLease);
         }
 
+        if (TrySelectSingleConfiguredPrefix(requestedAddressFamily, out EgressPrefix singleConfiguredPrefix))
+        {
+            IPAddress selectedAddress = AddressSelector.SelectRandom(singleConfiguredPrefix.Network);
+            int leasePrefixLength = GetHostPrefixLength(requestedAddressFamily);
+            IDisposable assignmentLease = AcquireAddressIfRequired(interfaceName, selectedAddress, leasePrefixLength);
+            return new SelectedEgressAddress(selectedAddress, leasePrefixLength, singleConfiguredPrefix, assignmentLease);
+        }
+
         IPAddressScope destinationScope = IPAddressScopeClassifier.GetScope(destinationAddress);
         EgressPrefix[] candidatePrefixes = GetCandidatePrefixes(requestedAddressFamily, destinationScope);
         LogCandidatePrefixes(destinationAddress, destinationScope, candidatePrefixes);
@@ -473,7 +481,8 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
     private SelectedEgressAddress SelectPreAssignedAddress(string interfaceName, AddressFamily requestedAddressFamily, IPAddress? destinationAddress)
     {
         IReadOnlyList<NetworkInterfaceAddress> assignedAddresses = platform.GetAssignedAddresses(interfaceName, requestedAddressFamily);
-        IPAddressScope? destinationScope = destinationAddress is null ? null : IPAddressScopeClassifier.GetScope(destinationAddress);
+        bool bypassDestinationFiltering = destinationAddress is not null && TrySelectSingleConfiguredPrefix(requestedAddressFamily, out _);
+        IPAddressScope? destinationScope = destinationAddress is null || bypassDestinationFiltering ? null : IPAddressScopeClassifier.GetScope(destinationAddress);
         List<SelectedEgressAddress> matchingAddresses = [];
 
         for (int assignedAddressIndex = 0; assignedAddressIndex < assignedAddresses.Count; assignedAddressIndex++)
@@ -495,7 +504,7 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
             throw new InvalidOperationException($"No pre-assigned {requestedAddressFamily} addresses on interface '{interfaceName}' match {destinationDescription}.");
         }
 
-        if (destinationAddress is null)
+        if (destinationAddress is null || bypassDestinationFiltering)
         {
             return matchingAddresses[RandomNumberGeneratorShim.GetInt32(matchingAddresses.Count)];
         }
@@ -578,6 +587,37 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
         }
 
         throw new InvalidOperationException($"No configured or auto-detected prefix matches address family {requestedAddressFamily}.");
+    }
+
+    private bool TrySelectSingleConfiguredPrefix(AddressFamily requestedAddressFamily, out EgressPrefix selectedPrefix)
+    {
+        selectedPrefix = default;
+        int matchingConfiguredPrefixCount = 0;
+
+        for (int prefixIndex = 0; prefixIndex < prefixes.Length; prefixIndex++)
+        {
+            EgressPrefix prefix = prefixes[prefixIndex];
+            if (prefix.Network.BaseAddress.AddressFamily != requestedAddressFamily)
+            {
+                continue;
+            }
+
+            if (prefix.IsAutoDetected)
+            {
+                selectedPrefix = default;
+                return false;
+            }
+
+            matchingConfiguredPrefixCount++;
+            selectedPrefix = prefix;
+            if (matchingConfiguredPrefixCount > 1)
+            {
+                selectedPrefix = default;
+                return false;
+            }
+        }
+
+        return matchingConfiguredPrefixCount == 1;
     }
 
     private EgressPrefix[] GetCandidatePrefixes(AddressFamily requestedAddressFamily, IPAddressScope destinationScope)
