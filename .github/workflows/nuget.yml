@@ -23,7 +23,9 @@ jobs:
           dotnet-version: latest
 
       - name: Pack
-        run: dotnet pack EgressPool.slnx --configuration Release --output artifacts --nologo
+        run: |
+          dotnet pack src/EgressPool.DependencyInjection/EgressPool.DependencyInjection.csproj --configuration Release --output artifacts --nologo
+          dotnet pack src/EgressPool/EgressPool.csproj --configuration Release --output artifacts --nologo
 
       - name: Upload package artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -34,6 +36,8 @@ jobs:
           if-no-files-found: error
 
       - name: NuGet Push
-        run: dotnet nuget push artifacts/*.nupkg --source https://api.nuget.org/v3/index.json --api-key "$NUGET_API_KEY" --skip-duplicate
+        run: |
+          dotnet nuget push artifacts/EgressPool.[0-9]*.nupkg --source https://api.nuget.org/v3/index.json --api-key "$NUGET_API_KEY" --skip-duplicate
+          dotnet nuget push artifacts/EgressPool.DependencyInjection.*.nupkg --source https://api.nuget.org/v3/index.json --api-key "$NUGET_API_KEY" --skip-duplicate
         env:
           NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
