@@ -14,7 +14,13 @@ public sealed class EgressAddressLease : IDisposable, IAsyncDisposable
     private readonly IActiveResourceTracker? activeResourceTracker;
     private int disposed;
 
-    internal EgressAddressLease(IPAddress address, string interfaceName, int prefixLength, Action release, IActiveResourceTracker? activeResourceTracker = null)
+    internal EgressAddressLease(
+        IPAddress address,
+        string interfaceName,
+        int prefixLength,
+        Action release,
+        IActiveResourceTracker? activeResourceTracker = null,
+        bool usesAutoDetectedPrefix = false)
     {
         Address = address;
         InterfaceName = interfaceName;
@@ -22,6 +28,7 @@ public sealed class EgressAddressLease : IDisposable, IAsyncDisposable
         AddressFamily = address.AddressFamily;
         this.release = release;
         this.activeResourceTracker = activeResourceTracker;
+        UsesAutoDetectedPrefix = usesAutoDetectedPrefix;
     }
 
     /// <summary>
@@ -43,6 +50,8 @@ public sealed class EgressAddressLease : IDisposable, IAsyncDisposable
     /// Gets the address family for the leased address.
     /// </summary>
     public AddressFamily AddressFamily { get; }
+
+    internal bool UsesAutoDetectedPrefix { get; }
 
     /// <summary>
     /// Gets a value indicating whether the lease has been disposed.
