@@ -1076,7 +1076,7 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
             }
         }
 
-        if (options.AutoDetectPrefixes)
+        if (ShouldAutoDetectPrefixes(options))
         {
             IReadOnlyList<IPNetwork> detectedPrefixes = platform.GetAllocatedPrefixes();
             logger?.LogTrace("Auto-detected egress prefixes: {DetectedPrefixes}.", FormatNetworks(detectedPrefixes));
@@ -1105,11 +1105,6 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(options.Prefixes);
         ArgumentNullException.ThrowIfNull(options.Cleanup);
-
-        if (options.Prefixes.Count == 0 && !options.AutoDetectPrefixes)
-        {
-            throw new ArgumentException("At least one prefix is required when automatic prefix detection is disabled.", nameof(options));
-        }
 
         IPNetwork[] prefixes = new IPNetwork[options.Prefixes.Count];
         for (int prefixIndex = 0; prefixIndex < options.Prefixes.Count; prefixIndex++)
@@ -1158,6 +1153,9 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
             throw new ArgumentException($"Address family {addressFamily} is not supported.");
         }
     }
+
+    private static bool ShouldAutoDetectPrefixes(EgressPoolOptions options) =>
+        options.AutoDetectPrefixes || options.Prefixes.Count == 0;
 
     private static string FormatNetworks(IReadOnlyList<IPNetwork> networks)
     {
