@@ -12,9 +12,7 @@ jobs:
   tests:
     uses: ./.github/workflows/tests.yml
 
-  publish-nuget:
+  nuget:
     needs: tests
-    uses: ./.github/workflows/publish-nuget.yml
-    with:
-      dotnet-version: latest
+    uses: ./.github/workflows/nuget.yml
     secrets: inherit

@@ -12,7 +12,7 @@
     <RepositoryUrl>https://github.com/caunt/EgressPool.git</RepositoryUrl>
   </PropertyGroup>
 
-  <PropertyGroup Condition="'$(EnableCalendarVersion)' == 'true'">
+  <PropertyGroup>
     <UtcStamp>$([System.DateTimeOffset]::UtcNow.ToString('yy MM dd HH mm ss'))</UtcStamp>
     <YearPart>$([System.Int32]::Parse('$(UtcStamp.Substring(0,2))'))</YearPart>
     <MonthPart>$([System.Int32]::Parse('$(UtcStamp.Substring(3,2))'))</MonthPart>
