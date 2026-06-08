@@ -23,9 +23,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: latest
 
       - name: Restore
         run: dotnet restore EgressPool.slnx
@@ -47,9 +47,4 @@ jobs:
         shell: bash
         env:
           EGRESSPOOL_PLATFORM_TESTS: "1"
-        run: |
-          sudo -E env \
-            "PATH=$PATH" \
-            "DOTNET_ROOT=$DOTNET_ROOT" \
-            "EGRESSPOOL_PLATFORM_TESTS=$EGRESSPOOL_PLATFORM_TESTS" \
-            dotnet test tests/EgressPool.PlatformTests/EgressPool.PlatformTests.csproj --configuration Release --no-build --logger "console;verbosity=normal"
+        run: sudo -E "$(command -v dotnet)" test tests/EgressPool.PlatformTests/EgressPool.PlatformTests.csproj --configuration Release --no-build --logger "console;verbosity=normal"
