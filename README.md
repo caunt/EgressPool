@@ -24,22 +24,6 @@ using HttpClient client = pool.CreateHttpClient();
 string response = await client.GetStringAsync("http://127.0.0.1:5000/");
 ```
 
-To merge auto-detected prefixes with manual prefixes:
-
-```csharp
-EgressPoolOptions options = new()
-{
-    Prefixes = [IPNetwork.Parse("127.0.0.0/8")],
-    AutoDetectPrefixes = true,
-};
-
-await using EgressPool pool = await EgressPool.CreateAsync(options);
-```
-
-Detected prefixes are merged into the same pool as configured prefixes. Destination-aware TCP, HTTP, `RentAddressAsync(IPAddress)`, and `CreateUdpClient(IPAddress)` calls prefer prefixes with the same address scope as the destination, then verify candidates with a UDP bind/connect probe before selecting one.
-
-When a logger is supplied directly or through dependency injection, `EgressPool` writes trace logs for detected prefixes, candidate prefixes, rejected candidates, and the final selected prefix.
-
 ## Expected Behavior
 
 Each outbound connection receives a source address from the configured pool. When the connection, client, or pool is disposed, the address is no longer held by that caller.
