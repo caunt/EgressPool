@@ -30,14 +30,15 @@ using HttpClient client = pool.CreateHttpClient();
 string response = await client.GetStringAsync("http://127.0.0.1:5000/");
 ```
 
-To add prefixes already allocated on local interfaces:
+To use prefixes already allocated on local interfaces without configuring manual prefixes:
 
 ```csharp
 EgressPoolOptions options = new()
 {
-    AutoDetectPrefixes = true,
 };
 ```
+
+Set `AutoDetectPrefixes = true` when you want to merge auto-detected prefixes with manually configured prefixes.
 
 Detected prefixes are merged into the same pool as configured prefixes. Destination-aware TCP, HTTP, `RentAddressAsync(IPAddress)`, and `CreateUdpClient(IPAddress)` calls prefer prefixes with the same address scope as the destination, then verify candidates with a UDP bind/connect probe before selecting one.
 

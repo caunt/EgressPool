@@ -14,7 +14,8 @@ public sealed record EgressPoolOptions
     public IReadOnlyList<IPNetwork> Prefixes { get; set; } = [];
 
     /// <summary>
-    /// Gets a value indicating whether prefixes allocated on local network interfaces should be detected during pool creation.
+    /// Gets a value indicating whether prefixes allocated on local network interfaces should always be detected during pool creation.
+    /// Detection is enabled by default when <see cref="Prefixes" /> is empty.
     /// </summary>
     public bool AutoDetectPrefixes { get; set; }
 

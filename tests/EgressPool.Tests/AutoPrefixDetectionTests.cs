@@ -6,7 +6,7 @@ namespace Egress.Tests;
 public sealed class AutoPrefixDetectionTests
 {
     [Fact]
-    public async Task RentAddressAsync_AutoDetectPrefixes_UsesDetectedPrefixWhenManualPrefixesAreEmpty()
+    public async Task RentAddressAsync_NoManualPrefixes_UsesDetectedPrefixByDefault()
     {
         FakeEgressNetworkPlatform platform = new();
         platform.AllocatedPrefixes.Add(IPNetwork.Parse("127.0.0.1/32"));
@@ -15,7 +15,6 @@ public sealed class AutoPrefixDetectionTests
             EgressInterfaceSelectionMode.Explicit,
             []) with
         {
-            AutoDetectPrefixes = true,
             ManageLocalRoutes = false,
         };
 
@@ -43,6 +42,23 @@ public sealed class AutoPrefixDetectionTests
         Assert.Equal(2, platform.EnsureLocalRouteCallCount);
         Assert.Contains(platform.AddedLocalRoutes, route => route.Prefix.Equals(IPNetwork.Parse("127.64.0.0/16")));
         Assert.Contains(platform.AddedLocalRoutes, route => route.Prefix.Equals(IPNetwork.Parse("127.65.0.0/16")));
+    }
+
+    [Fact]
+    public void CreateForTests_ManualPrefixesWithoutAutoDetect_DoesNotAddDetectedRoutes()
+    {
+        FakeEgressNetworkPlatform platform = new();
+        platform.AllocatedPrefixes.Add(IPNetwork.Parse("127.65.0.0/16"));
+        EgressPoolOptions options = TestOptions.Create(
+            EgressAddressMode.NonLocalBind,
+            EgressInterfaceSelectionMode.Explicit,
+            [IPNetwork.Parse("127.64.0.0/16")]);
+
+        using EgressPool pool = EgressPool.CreateForTests(options, platform);
+
+        Assert.Equal(1, platform.EnsureLocalRouteCallCount);
+        Assert.Contains(platform.AddedLocalRoutes, route => route.Prefix.Equals(IPNetwork.Parse("127.64.0.0/16")));
+        Assert.DoesNotContain(platform.AddedLocalRoutes, route => route.Prefix.Equals(IPNetwork.Parse("127.65.0.0/16")));
     }
 
     [Fact]
