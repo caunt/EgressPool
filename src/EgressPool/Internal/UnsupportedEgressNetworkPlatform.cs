@@ -20,6 +20,9 @@ internal sealed class UnsupportedEgressNetworkPlatform : IEgressNetworkPlatform
     public string GetRouteInterface(IPAddress destinationAddress) =>
         throw new PlatformNotSupportedException("Route lookup is currently supported only on Linux.");
 
+    public IReadOnlyList<IPNetwork> GetAllocatedPrefixes() =>
+        NetworkInterfaceHelpers.GetAllocatedPrefixes();
+
     public IReadOnlyList<NetworkInterfaceAddress> GetAssignedAddresses(string interfaceName, AddressFamily addressFamily) =>
         NetworkInterfaceHelpers.GetAssignedAddressesByName(interfaceName, addressFamily);
 

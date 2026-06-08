@@ -20,6 +20,9 @@ internal sealed class MacOsEgressNetworkPlatform : IEgressNetworkPlatform
     public string GetRouteInterface(IPAddress destinationAddress) =>
         NetworkInterfaceHelpers.GetRouteInterface(destinationAddress);
 
+    public IReadOnlyList<IPNetwork> GetAllocatedPrefixes() =>
+        NetworkInterfaceHelpers.GetAllocatedPrefixes();
+
     public IReadOnlyList<NetworkInterfaceAddress> GetAssignedAddresses(string interfaceName, AddressFamily addressFamily) =>
         NetworkInterfaceHelpers.GetAssignedAddresses(interfaceName, addressFamily);
 

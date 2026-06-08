@@ -9,9 +9,14 @@ namespace Egress;
 public sealed record EgressPoolOptions
 {
     /// <summary>
-    /// Gets the IPv4 and IPv6 prefixes that may be used for outbound source addresses.
+    /// Gets the configured IPv4 and IPv6 prefixes that may be used for outbound source addresses.
     /// </summary>
-    public required IReadOnlyList<IPNetwork> Prefixes { get; set; }
+    public IReadOnlyList<IPNetwork> Prefixes { get; set; } = [];
+
+    /// <summary>
+    /// Gets a value indicating whether prefixes allocated on local network interfaces should be detected during pool creation.
+    /// </summary>
+    public bool AutoDetectPrefixes { get; set; }
 
     /// <summary>
     /// Gets the mode used to make selected source addresses bindable.
