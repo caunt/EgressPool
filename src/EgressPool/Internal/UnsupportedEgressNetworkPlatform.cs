@@ -5,8 +5,6 @@ namespace Egress.Internal;
 
 internal sealed class UnsupportedEgressNetworkPlatform : IEgressNetworkPlatform
 {
-    public string PlatformName => "unsupported";
-
     public bool SupportsTrueNonLocalBind => false;
 
     public bool SupportsManagedLocalRoutes => false;
@@ -31,7 +29,4 @@ internal sealed class UnsupportedEgressNetworkPlatform : IEgressNetworkPlatform
 
     public PlatformNetworkStateLease EnsureLocalRoute(IPNetwork prefix, string interfaceName) =>
         throw new PlatformNotSupportedException("Managed local routes are currently supported only on Linux.");
-
-    public void DeleteOwnedState(OwnedNetworkStateEntry entry) =>
-        throw new PlatformNotSupportedException("Network state cleanup is not supported on this platform.");
 }

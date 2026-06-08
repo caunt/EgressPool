@@ -21,7 +21,6 @@ public sealed class DependencyInjectionBehaviorTests
             configuredOptions.InterfaceName = options.InterfaceName;
             configuredOptions.DefaultAddressFamily = options.DefaultAddressFamily;
             configuredOptions.ManageLocalRoutes = options.ManageLocalRoutes;
-            configuredOptions.Cleanup = options.Cleanup;
         });
 
         using ServiceProvider serviceProvider = services.BuildServiceProvider();
@@ -44,7 +43,6 @@ public sealed class DependencyInjectionBehaviorTests
         Assert.Equal(EgressAddressMode.NonLocalBind, options.AddressMode);
         Assert.Equal(EgressInterfaceSelectionMode.DefaultRoute, options.InterfaceSelectionMode);
         Assert.True(options.ManageLocalRoutes);
-        Assert.NotNull(options.Cleanup);
     }
 
     [Fact]

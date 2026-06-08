@@ -5,8 +5,6 @@ namespace Egress.Internal;
 
 internal interface IEgressNetworkPlatform
 {
-    string PlatformName { get; }
-
     bool SupportsTrueNonLocalBind { get; }
 
     bool SupportsManagedLocalRoutes { get; }
@@ -24,6 +22,4 @@ internal interface IEgressNetworkPlatform
     PlatformNetworkStateLease AddAddress(string interfaceName, IPAddress address, int prefixLength);
 
     PlatformNetworkStateLease EnsureLocalRoute(IPNetwork prefix, string interfaceName);
-
-    void DeleteOwnedState(OwnedNetworkStateEntry entry);
 }

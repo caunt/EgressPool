@@ -54,8 +54,4 @@ public sealed record EgressPoolOptions
     /// </summary>
     public string LocalRouteInterfaceName { get; set; } = "lo";
 
-    /// <summary>
-    /// Gets cleanup options for network state created by the pool.
-    /// </summary>
-    public EgressCleanupOptions Cleanup { get; set; } = new();
 }

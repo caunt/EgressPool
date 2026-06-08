@@ -5,8 +5,6 @@ namespace Egress.Internal;
 
 internal sealed class MacOsEgressNetworkPlatform : IEgressNetworkPlatform
 {
-    public string PlatformName => "macos";
-
     public bool SupportsTrueNonLocalBind => false;
 
     public bool SupportsManagedLocalRoutes => false;
@@ -41,11 +39,4 @@ internal sealed class MacOsEgressNetworkPlatform : IEgressNetworkPlatform
     public PlatformNetworkStateLease EnsureLocalRoute(IPNetwork prefix, string interfaceName) =>
         PlatformNetworkStateLease.NotCreated;
 
-    public void DeleteOwnedState(OwnedNetworkStateEntry entry)
-    {
-        if (entry.Kind == OwnedNetworkStateKind.Address)
-        {
-            MacOsNetworkNative.DeleteAddress(entry.InterfaceName, entry.GetAddress(), entry.PrefixLength);
-        }
-    }
 }

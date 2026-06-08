@@ -15,8 +15,6 @@ internal sealed class LinuxEgressNetworkPlatform : IEgressNetworkPlatform
     private static readonly IPAddress Ipv4DefaultRouteProbeAddress = IPAddress.Parse("8.8.8.8");
     private static readonly IPAddress Ipv6DefaultRouteProbeAddress = IPAddress.Parse("2001:4860:4860::8888");
 
-    public string PlatformName => "linux";
-
     public bool SupportsTrueNonLocalBind => true;
 
     public bool SupportsManagedLocalRoutes => true;
@@ -109,23 +107,6 @@ internal sealed class LinuxEgressNetworkPlatform : IEgressNetworkPlatform
         }
 
         return new PlatformNetworkStateLease(true, new ActionDisposable(() => NetlinkClient.DeleteLocalRoute(interfaceIndex, prefix)));
-    }
-
-    public void DeleteOwnedState(OwnedNetworkStateEntry entry)
-    {
-        int interfaceIndex = GetInterfaceIndex(entry.InterfaceName);
-
-        switch (entry.Kind)
-        {
-            case OwnedNetworkStateKind.Address:
-                NetlinkClient.DeleteAddress(interfaceIndex, entry.GetAddress(), entry.PrefixLength);
-                break;
-            case OwnedNetworkStateKind.LocalRoute:
-                NetlinkClient.DeleteLocalRoute(interfaceIndex, entry.GetNetwork());
-                break;
-            default:
-                throw new InvalidOperationException($"Unknown owned network state kind {entry.Kind}.");
-        }
     }
 
     private static int GetInterfaceIndex(string interfaceName)

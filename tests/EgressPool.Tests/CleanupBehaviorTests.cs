@@ -1,6 +1,4 @@
 using System.Net;
-using Egress.Internal;
-
 namespace Egress.Tests;
 
 public sealed class CleanupBehaviorTests
@@ -31,7 +29,7 @@ public sealed class CleanupBehaviorTests
     }
 
     [Fact]
-    public async Task RentAddressAsync_WhenAddressAddFails_RemovesPendingState()
+    public async Task RentAddressAsync_WhenAddressAddFails_DoesNotDeleteAddress()
     {
         FakeEgressNetworkPlatform platform = new()
         {
@@ -45,16 +43,13 @@ public sealed class CleanupBehaviorTests
         using EgressPool pool = EgressPool.CreateForTests(options, platform);
 
         await Assert.ThrowsAsync<InvalidOperationException>(async () => await pool.RentAddressAsync());
-        EgressPool.CleanupStaleStateForTests(platform, options.Cleanup);
-        OwnedNetworkStateStore store = OwnedNetworkStateStore.Create(options.Cleanup);
 
         Assert.Equal(1, platform.AddAddressCallCount);
         Assert.Equal(0, platform.DeleteAddressCallCount);
-        Assert.Empty(store.GetStaleEntries(platform.PlatformName));
     }
 
     [Fact]
-    public async Task RentAddressAsync_WhenPlatformReportsAddressAlreadyExists_DoesNotTrackOwnedState()
+    public async Task RentAddressAsync_WhenPlatformReportsAddressAlreadyExists_DoesNotDeleteAddress()
     {
         FakeEgressNetworkPlatform platform = new()
         {
@@ -73,11 +68,8 @@ public sealed class CleanupBehaviorTests
         Assert.Equal(0, platform.DeleteAddressCallCount);
 
         lease.Dispose();
-        EgressPool.CleanupStaleStateForTests(platform, options.Cleanup);
-        OwnedNetworkStateStore store = OwnedNetworkStateStore.Create(options.Cleanup);
 
         Assert.Equal(0, platform.DeleteAddressCallCount);
-        Assert.Empty(store.GetStaleEntries(platform.PlatformName));
     }
 
     [Fact]
@@ -100,43 +92,4 @@ public sealed class CleanupBehaviorTests
 
         Assert.Equal(0, platform.DeleteLocalRouteCallCount);
     }
-
-    [Fact]
-    public void CleanupStaleState_WhenOneDeleteFails_ContinuesAndThrowsAggregate()
-    {
-        string stateDirectory = Path.Combine(Path.GetTempPath(), "EgressPool.Tests", Guid.NewGuid().ToString("N"));
-        EgressCleanupOptions cleanupOptions = new()
-        {
-            EnableProcessExitCleanup = false,
-            RecoverStaleOwnedStateOnCreate = false,
-            StateDirectory = stateDirectory,
-        };
-        OwnedNetworkStateStore store = OwnedNetworkStateStore.Create(cleanupOptions);
-        store.AddPending(CreateStaleAddressEntry("first-stale-entry", IPAddress.Parse("127.0.0.10")));
-        store.AddPending(CreateStaleAddressEntry("second-stale-entry", IPAddress.Parse("127.0.0.11")));
-        FakeEgressNetworkPlatform platform = new()
-        {
-            FailDeleteAddressOnCall = 1,
-        };
-
-        AggregateException exception = Assert.Throws<AggregateException>(() => EgressPool.CleanupStaleStateForTests(platform, cleanupOptions));
-
-        Assert.Single(exception.InnerExceptions);
-        Assert.Equal(2, platform.DeleteAddressCallCount);
-        Assert.Single(store.GetStaleEntries(platform.PlatformName));
-    }
-
-    private static OwnedNetworkStateEntry CreateStaleAddressEntry(string id, IPAddress address) =>
-        OwnedNetworkStateEntry.CreatePending(
-            "test",
-            OwnedNetworkStateKind.Address,
-            "eth-test",
-            address,
-            32) with
-        {
-            Id = id,
-            Status = OwnedNetworkStateStatus.Created,
-            OwnerProcessId = int.MaxValue,
-            OwnerProcessStartTimeUtc = DateTimeOffset.UnixEpoch,
-        };
 }

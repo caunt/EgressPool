@@ -6,8 +6,6 @@ namespace Egress.Internal;
 
 internal sealed class WindowsEgressNetworkPlatform : IEgressNetworkPlatform
 {
-    public string PlatformName => "windows";
-
     public bool SupportsTrueNonLocalBind => false;
 
     public bool SupportsManagedLocalRoutes => false;
@@ -42,17 +40,6 @@ internal sealed class WindowsEgressNetworkPlatform : IEgressNetworkPlatform
 
     public PlatformNetworkStateLease EnsureLocalRoute(IPNetwork prefix, string interfaceName) =>
         PlatformNetworkStateLease.NotCreated;
-
-    public void DeleteOwnedState(OwnedNetworkStateEntry entry)
-    {
-        if (entry.Kind != OwnedNetworkStateKind.Address)
-        {
-            return;
-        }
-
-        uint interfaceIndex = GetInterfaceIndex(entry.InterfaceName, entry.GetAddress().AddressFamily);
-        WindowsIpHelper.DeleteUnicastAddress(interfaceIndex, entry.GetAddress(), entry.PrefixLength);
-    }
 
     private static uint GetInterfaceIndex(string interfaceName, AddressFamily addressFamily)
     {

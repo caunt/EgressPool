@@ -186,7 +186,6 @@ public sealed class RealPlatformBehaviorTests
             LocalRouteInterfaceName = loopbackInterfaceName,
             ManageLocalRoutes = false,
             DefaultAddressFamily = defaultAddressFamily,
-            Cleanup = PlatformTestHelpers.CreateCleanupOptions(),
         };
 
         await using EgressPool pool = await EgressPool.CreateAsync(options);
@@ -216,7 +215,6 @@ public sealed class RealPlatformBehaviorTests
             InterfaceSelectionMode = EgressInterfaceSelectionMode.DefaultRoute,
             DefaultAddressFamily = addressFamily,
             ManageLocalRoutes = false,
-            Cleanup = PlatformTestHelpers.CreateCleanupOptions(),
         };
 
         await using EgressPool pool = await EgressPool.CreateAsync(options);
@@ -224,31 +222,6 @@ public sealed class RealPlatformBehaviorTests
 
         Assert.Equal(interfaceName, lease.InterfaceName);
         Assert.Equal(assignedAddress.Address, lease.Address);
-    }
-
-    [PlatformTheory]
-    [InlineData(AddressFamily.InterNetwork)]
-    [InlineData(AddressFamily.InterNetworkV6)]
-    public async Task CleanupStaleStateAsync_RealPlatform_RemovesStaleAssignedAddress(AddressFamily addressFamily)
-    {
-        PlatformScenario scenario = new(
-            PlatformApi.RentAddress,
-            addressFamily,
-            EgressAddressMode.AssignOnDemand,
-            EgressInterfaceSelectionMode.Explicit,
-            ManageLocalRoutes: false);
-        using ScenarioContext context = CreateScenarioContext(scenario);
-
-        EgressPool pool = await EgressPool.CreateAsync(context.Options);
-        EgressAddressLease lease = await pool.RentAddressAsync();
-        await PlatformTestHelpers.WaitUntilAddressAssignedAsync(context.LoopbackInterfaceName, context.SourceAddress);
-        PlatformTestHelpers.MarkOwnedStateAsStale(context.Options.Cleanup.StateDirectory!);
-
-        await EgressPool.CleanupStaleStateAsync(context.Options.Cleanup);
-        await PlatformTestHelpers.WaitUntilAddressUnassignedAsync(context.LoopbackInterfaceName, context.SourceAddress);
-
-        GC.KeepAlive(pool);
-        GC.KeepAlive(lease);
     }
 
     [PlatformTheory]
@@ -308,7 +281,6 @@ public sealed class RealPlatformBehaviorTests
             LocalRouteInterfaceName = loopbackInterfaceName,
             ManageLocalRoutes = scenario.ManageLocalRoutes,
             DefaultAddressFamily = scenario.AddressFamily,
-            Cleanup = PlatformTestHelpers.CreateCleanupOptions(),
         };
 
         return new ScenarioContext(scenario, options, sourceAddress, loopbackInterfaceName, () => observedContext);
@@ -368,16 +340,6 @@ public sealed class RealPlatformBehaviorTests
 
         public void Dispose()
         {
-            if (Options.Cleanup.StateDirectory is { } stateDirectory)
-            {
-                try
-                {
-                    Directory.Delete(stateDirectory, recursive: true);
-                }
-                catch
-                {
-                }
-            }
         }
     }
 }

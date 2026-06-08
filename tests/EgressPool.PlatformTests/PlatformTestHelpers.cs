@@ -5,7 +5,6 @@ using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
-using System.Text.Json.Nodes;
 using Egress.Internal;
 
 namespace Egress.PlatformTests;
@@ -106,14 +105,6 @@ internal static class PlatformTestHelpers
     internal static IPNetwork CreateHostPrefix(IPAddress address) =>
         new(address, GetHostPrefixLength(address.AddressFamily));
 
-    internal static EgressCleanupOptions CreateCleanupOptions() =>
-        new()
-        {
-            EnableProcessExitCleanup = false,
-            RecoverStaleOwnedStateOnCreate = false,
-            StateDirectory = Path.Combine(Path.GetTempPath(), "EgressPool.PlatformTests", Guid.NewGuid().ToString("N")),
-        };
-
     internal static bool IsAddressAssigned(string interfaceName, IPAddress address)
     {
         NetworkInterface[] networkInterfaces = NetworkInterface.GetAllNetworkInterfaces();
@@ -179,23 +170,6 @@ internal static class PlatformTestHelpers
         }
 
         return false;
-    }
-
-    internal static void MarkOwnedStateAsStale(string stateDirectory)
-    {
-        string statePath = Path.Combine(stateDirectory, "owned-network-state.json");
-        JsonArray entries = JsonNode.Parse(File.ReadAllText(statePath))!.AsArray();
-        foreach (JsonNode? entryNode in entries)
-        {
-            JsonObject entry = entryNode!.AsObject();
-            entry["OwnerProcessId"] = int.MaxValue;
-            entry["OwnerProcessStartTimeUtc"] = DateTimeOffset.UnixEpoch;
-        }
-
-        File.WriteAllText(statePath, entries.ToJsonString(new System.Text.Json.JsonSerializerOptions
-        {
-            WriteIndented = true,
-        }));
     }
 
     internal static IReadOnlyList<PlatformScenario> CreateScenarios(PlatformApi api)

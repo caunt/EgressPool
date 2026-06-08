@@ -6,8 +6,6 @@ namespace Egress.Tests;
 
 internal sealed class FakeEgressNetworkPlatform : IEgressNetworkPlatform
 {
-    public string PlatformName => "test";
-
     public bool SupportsTrueNonLocalBind { get; init; } = true;
 
     public bool SupportsManagedLocalRoutes { get; init; } = true;
@@ -53,8 +51,6 @@ internal sealed class FakeEgressNetworkPlatform : IEgressNetworkPlatform
     internal int? FailDeleteAddressOnCall { get; init; }
 
     internal int? FailDeleteLocalRouteOnCall { get; init; }
-
-    internal int? FailDeleteOwnedStateOnCall { get; init; }
 
     internal bool ReturnNotCreatedAddressLease { get; init; }
 
@@ -153,24 +149,6 @@ internal sealed class FakeEgressNetworkPlatform : IEgressNetworkPlatform
         }
 
         return new PlatformNetworkStateLease(true, new ActionDisposable(() => DeleteLocalRoute(operation)));
-    }
-
-    public void DeleteOwnedState(OwnedNetworkStateEntry entry)
-    {
-        int deleteOwnedStateCallCount = DeleteAddressCallCount + DeleteLocalRouteCallCount + 1;
-        if (FailDeleteOwnedStateOnCall == deleteOwnedStateCallCount)
-        {
-            throw new InvalidOperationException("Owned state delete failed.");
-        }
-
-        if (entry.Kind == OwnedNetworkStateKind.Address)
-        {
-            DeleteAddress(new FakeAddressOperation(entry.InterfaceName, entry.GetAddress(), entry.PrefixLength));
-        }
-        else
-        {
-            DeleteLocalRoute(new FakeRouteOperation(entry.InterfaceName, entry.GetNetwork()));
-        }
     }
 
     private void DeleteAddress(FakeAddressOperation operation)

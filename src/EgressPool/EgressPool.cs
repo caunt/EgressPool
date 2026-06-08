@@ -16,7 +16,6 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
 {
     private readonly EgressPoolOptions options;
     private readonly IEgressNetworkPlatform platform;
-    private readonly OwnedNetworkStateStore stateStore;
     private readonly ILogger<EgressPool>? logger;
     private readonly EgressPrefix[] prefixes;
     private readonly ConcurrentDictionary<IDisposable, byte> activeResources = [];
@@ -31,7 +30,6 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
         this.platform = platform;
         this.logger = logger;
         prefixes = CreateEffectivePrefixes(this.options, platform, logger);
-        stateStore = OwnedNetworkStateStore.Create(this.options.Cleanup);
     }
 
     /// <summary>
@@ -56,10 +54,6 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
 
         EgressPoolOptions resolvedOptions = options ?? new EgressPoolOptions();
         EgressPool pool = new(resolvedOptions, EgressPlatform.Create(), logger);
-        if (pool.options.Cleanup.RecoverStaleOwnedStateOnCreate)
-        {
-            pool.CleanupStaleState(cancellationToken);
-        }
 
         try
         {
@@ -73,23 +67,6 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
         }
 
         return ValueTask.FromResult(pool);
-    }
-
-    /// <summary>
-    /// Removes stale network state previously created by dead egress pool processes on the current platform.
-    /// </summary>
-    /// <param name="options">Cleanup options. Default options are used when this is <see langword="null" />.</param>
-    /// <param name="cancellationToken">A cancellation token.</param>
-    /// <returns>A completed value task when cleanup has finished.</returns>
-    public static ValueTask CleanupStaleStateAsync(EgressCleanupOptions? options = null, CancellationToken cancellationToken = default)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-
-        EgressCleanupOptions cleanupOptions = options ?? new EgressCleanupOptions();
-        IEgressNetworkPlatform platform = EgressPlatform.Create();
-        OwnedNetworkStateStore stateStore = OwnedNetworkStateStore.Create(cleanupOptions);
-        CleanupStaleState(platform, stateStore, cancellationToken);
-        return ValueTask.CompletedTask;
     }
 
     /// <summary>
@@ -358,9 +335,6 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
 
         return pool;
     }
-
-    internal static void CleanupStaleStateForTests(IEgressNetworkPlatform platform, EgressCleanupOptions options, CancellationToken cancellationToken = default) =>
-        CleanupStaleState(platform, OwnedNetworkStateStore.Create(options), cancellationToken);
 
     private void Initialize()
     {
@@ -811,39 +785,18 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
 
     private IDisposable AcquireAddress(string interfaceName, IPAddress address, int prefixLength)
     {
-        OwnedNetworkStateEntry entry = stateStore.AddPending(OwnedNetworkStateEntry.CreatePending(
-            platform.PlatformName,
-            OwnedNetworkStateKind.Address,
-            interfaceName,
-            address,
-            prefixLength));
-
         PlatformNetworkStateLease platformLease = default;
 
         try
         {
             platformLease = platform.AddAddress(interfaceName, address, prefixLength);
-            if (!platformLease.Created)
-            {
-                stateStore.Remove(entry.Id);
-                return platformLease.Disposable;
-            }
-
-            stateStore.MarkCreated(entry.Id);
-            return new OwnedNetworkStateLease(platformLease.Disposable, stateStore, entry.Id);
+            return platformLease.Disposable;
         }
         catch
         {
-            try
+            if (platformLease.Created)
             {
-                if (platformLease.Created)
-                {
-                    platformLease.Disposable.Dispose();
-                }
-            }
-            finally
-            {
-                stateStore.Remove(entry.Id);
+                platformLease.Disposable.Dispose();
             }
 
             throw;
@@ -852,38 +805,18 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
 
     private IDisposable AcquireLocalRoute(IPNetwork prefix, string interfaceName)
     {
-        OwnedNetworkStateEntry entry = stateStore.AddPending(OwnedNetworkStateEntry.CreatePending(
-            platform.PlatformName,
-            OwnedNetworkStateKind.LocalRoute,
-            interfaceName,
-            prefix));
-
         PlatformNetworkStateLease platformLease = default;
 
         try
         {
             platformLease = platform.EnsureLocalRoute(prefix, interfaceName);
-            if (!platformLease.Created)
-            {
-                stateStore.Remove(entry.Id);
-                return platformLease.Disposable;
-            }
-
-            stateStore.MarkCreated(entry.Id);
-            return new OwnedNetworkStateLease(platformLease.Disposable, stateStore, entry.Id);
+            return platformLease.Disposable;
         }
         catch
         {
-            try
+            if (platformLease.Created)
             {
-                if (platformLease.Created)
-                {
-                    platformLease.Disposable.Dispose();
-                }
-            }
-            finally
-            {
-                stateStore.Remove(entry.Id);
+                platformLease.Disposable.Dispose();
             }
 
             throw;
@@ -910,38 +843,7 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
 
     private void RegisterProcessCleanup()
     {
-        if (options.Cleanup.EnableProcessExitCleanup)
-        {
-            processCleanupRegistration = new ProcessCleanupRegistration(DisposeSuppressingExceptions);
-        }
-    }
-
-    private void CleanupStaleState(CancellationToken cancellationToken) =>
-        CleanupStaleState(platform, stateStore, cancellationToken);
-
-    private static void CleanupStaleState(IEgressNetworkPlatform platform, OwnedNetworkStateStore stateStore, CancellationToken cancellationToken)
-    {
-        List<Exception> exceptions = [];
-
-        foreach (OwnedNetworkStateEntry entry in stateStore.GetStaleEntries(platform.PlatformName))
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            try
-            {
-                platform.DeleteOwnedState(entry);
-                stateStore.Remove(entry.Id);
-            }
-            catch (Exception exception)
-            {
-                exceptions.Add(exception);
-            }
-        }
-
-        if (exceptions.Count > 0)
-        {
-            throw new AggregateException("One or more stale egress pool cleanup operations failed.", exceptions);
-        }
+        processCleanupRegistration = new ProcessCleanupRegistration(DisposeSuppressingExceptions);
     }
 
     private void DisposeSuppressingExceptions()
@@ -1106,7 +1008,6 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(options.Prefixes);
-        ArgumentNullException.ThrowIfNull(options.Cleanup);
 
         IPNetwork[] prefixes = new IPNetwork[options.Prefixes.Count];
         for (int prefixIndex = 0; prefixIndex < options.Prefixes.Count; prefixIndex++)
@@ -1139,12 +1040,6 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
         return options with
         {
             Prefixes = prefixes,
-            Cleanup = new EgressCleanupOptions
-            {
-                EnableProcessExitCleanup = options.Cleanup.EnableProcessExitCleanup,
-                RecoverStaleOwnedStateOnCreate = options.Cleanup.RecoverStaleOwnedStateOnCreate,
-                StateDirectory = options.Cleanup.StateDirectory,
-            },
         };
     }
 

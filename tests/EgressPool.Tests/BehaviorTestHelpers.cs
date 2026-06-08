@@ -45,12 +45,6 @@ internal static class BehaviorTestHelpers
             InterfaceName = GetLoopbackInterfaceName(),
             DefaultAddressFamily = AddressFamily.InterNetwork,
             ManageLocalRoutes = false,
-            Cleanup = new EgressCleanupOptions
-            {
-                EnableProcessExitCleanup = false,
-                RecoverStaleOwnedStateOnCreate = false,
-                StateDirectory = Path.Combine(Path.GetTempPath(), "EgressPool.Tests", Guid.NewGuid().ToString("N")),
-            },
         };
 }
 

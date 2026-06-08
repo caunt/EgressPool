@@ -35,12 +35,6 @@ internal static class TestOptions
             InterfaceName = "eth-test",
             LocalRouteInterfaceName = "lo-test",
             DefaultAddressFamily = defaultAddressFamily,
-            Cleanup = new EgressCleanupOptions
-            {
-                EnableProcessExitCleanup = false,
-                RecoverStaleOwnedStateOnCreate = false,
-                StateDirectory = Path.Combine(Path.GetTempPath(), "EgressPool.Tests", Guid.NewGuid().ToString("N")),
-            },
         };
     }
 }
