@@ -1,5 +1,6 @@
 using Egress;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace Microsoft.Extensions.DependencyInjection;
@@ -24,7 +25,8 @@ public static class EgressPoolServiceCollectionExtensions
         services.TryAddSingleton(serviceProvider =>
         {
             EgressPoolOptions options = serviceProvider.GetRequiredService<IOptions<EgressPoolOptions>>().Value;
-            return EgressPool.CreateAsync(options).AsTask().GetAwaiter().GetResult();
+            ILogger<EgressPool>? logger = serviceProvider.GetService<ILogger<EgressPool>>();
+            return EgressPool.CreateAsync(options, logger).AsTask().GetAwaiter().GetResult();
         });
 
         return services;

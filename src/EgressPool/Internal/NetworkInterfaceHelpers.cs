@@ -61,6 +61,41 @@ internal static class NetworkInterfaceHelpers
         return matchingAddresses;
     }
 
+    internal static IReadOnlyList<IPNetwork> GetAllocatedPrefixes()
+    {
+        NetworkInterface[] networkInterfaces = NetworkInterface.GetAllNetworkInterfaces();
+        List<IPNetwork> prefixes = [];
+
+        for (int networkInterfaceIndex = 0; networkInterfaceIndex < networkInterfaces.Length; networkInterfaceIndex++)
+        {
+            NetworkInterface networkInterface = networkInterfaces[networkInterfaceIndex];
+            if (networkInterface.OperationalStatus != OperationalStatus.Up)
+            {
+                continue;
+            }
+
+            foreach (UnicastIPAddressInformation addressInformation in networkInterface.GetIPProperties().UnicastAddresses)
+            {
+                AddressFamily addressFamily = addressInformation.Address.AddressFamily;
+                if (addressFamily is not (AddressFamily.InterNetwork or AddressFamily.InterNetworkV6))
+                {
+                    continue;
+                }
+
+                int prefixLength = addressInformation.PrefixLength;
+                int maximumPrefixLength = addressFamily == AddressFamily.InterNetwork ? 32 : 128;
+                if (prefixLength < 0 || prefixLength > maximumPrefixLength)
+                {
+                    continue;
+                }
+
+                prefixes.Add(new IPNetwork(addressInformation.Address, prefixLength));
+            }
+        }
+
+        return prefixes;
+    }
+
     internal static NetworkInterface ResolveInterface(string interfaceName)
     {
         NetworkInterface[] networkInterfaces = NetworkInterface.GetAllNetworkInterfaces();
