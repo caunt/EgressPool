@@ -14,14 +14,16 @@ public static class EgressPoolServiceCollectionExtensions
     /// Registers a singleton <see cref="EgressPool" />.
     /// </summary>
     /// <param name="services">The service collection.</param>
-    /// <param name="configureOptions">The options configuration callback.</param>
+    /// <param name="configureOptions">The options configuration callback. When <see langword="null" />, default options are used.</param>
     /// <returns>The service collection.</returns>
-    public static IServiceCollection AddEgressPool(this IServiceCollection services, Action<EgressPoolOptions> configureOptions)
+    public static IServiceCollection AddEgressPool(this IServiceCollection services, Action<EgressPoolOptions>? configureOptions = null)
     {
         ArgumentNullException.ThrowIfNull(services);
-        ArgumentNullException.ThrowIfNull(configureOptions);
-
-        services.AddOptions<EgressPoolOptions>().Configure(configureOptions);
+        OptionsBuilder<EgressPoolOptions> optionsBuilder = services.AddOptions<EgressPoolOptions>();
+        if (configureOptions is not null)
+        {
+            optionsBuilder.Configure(configureOptions);
+        }
         services.TryAddSingleton(serviceProvider =>
         {
             EgressPoolOptions options = serviceProvider.GetRequiredService<IOptions<EgressPoolOptions>>().Value;
