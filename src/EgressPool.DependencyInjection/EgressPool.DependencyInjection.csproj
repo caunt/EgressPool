@@ -8,6 +8,8 @@
   <PropertyGroup>
     <RootNamespace>Egress.DependencyInjection</RootNamespace>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <Description>Dependency injection and IHttpClientFactory integration for EgressPool.</Description>
+    <PackageTags>egress;networking;dependency-injection;httpclientfactory</PackageTags>
   </PropertyGroup>
 
 </Project>

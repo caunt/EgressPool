@@ -4,6 +4,8 @@
     <RootNamespace>Egress</RootNamespace>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Description>Outbound TCP, UDP, and HTTP source address pool for .NET applications.</Description>
+    <PackageTags>egress;networking;http;tcp;udp;source-address</PackageTags>
   </PropertyGroup>
 
   <ItemGroup>

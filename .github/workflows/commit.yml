@@ -11,3 +11,10 @@ permissions:
 jobs:
   tests:
     uses: ./.github/workflows/tests.yml
+
+  publish-nuget:
+    needs: tests
+    uses: ./.github/workflows/publish-nuget.yml
+    with:
+      dotnet-version: latest
+    secrets: inherit

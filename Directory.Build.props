@@ -4,5 +4,32 @@
     <LangVersion>14.0</LangVersion>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <Authors>Vitalii Kotenko</Authors>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/caunt/EgressPool</PackageProjectUrl>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <RepositoryType>git</RepositoryType>
+    <RepositoryUrl>https://github.com/caunt/EgressPool.git</RepositoryUrl>
   </PropertyGroup>
+
+  <PropertyGroup Condition="'$(EnableCalendarVersion)' == 'true'">
+    <UtcStamp>$([System.DateTimeOffset]::UtcNow.ToString('yy MM dd HH mm ss'))</UtcStamp>
+    <YearPart>$([System.Int32]::Parse('$(UtcStamp.Substring(0,2))'))</YearPart>
+    <MonthPart>$([System.Int32]::Parse('$(UtcStamp.Substring(3,2))'))</MonthPart>
+    <DayPart>$([System.Int32]::Parse('$(UtcStamp.Substring(6,2))'))</DayPart>
+    <HourPart>$([System.Int32]::Parse('$(UtcStamp.Substring(9,2))'))</HourPart>
+    <MinutePart>$([System.Int32]::Parse('$(UtcStamp.Substring(12,2))'))</MinutePart>
+    <SecondPart>$([System.Int32]::Parse('$(UtcStamp.Substring(15,2))'))</SecondPart>
+    <HoursAsSeconds>$([MSBuild]::Multiply($(HourPart), 3600))</HoursAsSeconds>
+    <MinutesAsSeconds>$([MSBuild]::Multiply($(MinutePart), 60))</MinutesAsSeconds>
+    <SecondsOfDay>$([MSBuild]::Add($([MSBuild]::Add($(HoursAsSeconds), $(MinutesAsSeconds))), $(SecondPart)))</SecondsOfDay>
+    <SecondsOfDayScaled>$([MSBuild]::Multiply($(SecondsOfDay), 9000))</SecondsOfDayScaled>
+    <BucketPart>$([MSBuild]::Add(1000, $([MSBuild]::Divide($(SecondsOfDayScaled), 86400))))</BucketPart>
+    <Version>$(YearPart).$(MonthPart).$(DayPart).$(BucketPart)</Version>
+    <PackageVersion>$(Version)</PackageVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
 </Project>
