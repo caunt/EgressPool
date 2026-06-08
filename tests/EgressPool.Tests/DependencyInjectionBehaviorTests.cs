@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http;
 using Egress.Internal;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 
 namespace Egress.Tests;
 
@@ -28,6 +29,22 @@ public sealed class DependencyInjectionBehaviorTests
         EgressPool secondPool = serviceProvider.GetRequiredService<EgressPool>();
 
         Assert.Same(firstPool, secondPool);
+    }
+
+    [Fact]
+    public void AddEgressPool_WithoutConfigureOptions_RegistersDefaultOptions()
+    {
+        ServiceCollection services = new();
+        services.AddEgressPool();
+
+        using ServiceProvider serviceProvider = services.BuildServiceProvider();
+        EgressPoolOptions options = serviceProvider.GetRequiredService<IOptions<EgressPoolOptions>>().Value;
+
+        Assert.Empty(options.Prefixes);
+        Assert.Equal(EgressAddressMode.NonLocalBind, options.AddressMode);
+        Assert.Equal(EgressInterfaceSelectionMode.DefaultRoute, options.InterfaceSelectionMode);
+        Assert.True(options.ManageLocalRoutes);
+        Assert.NotNull(options.Cleanup);
     }
 
     [Fact]

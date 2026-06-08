@@ -29,7 +29,7 @@ string response = await client.GetStringAsync("http://127.0.0.1:5000/");
 Install the `EgressPool.DependencyInjection` package and register the pool with your service collection:
 
 ```csharp
-builder.Services.AddEgressPool(options => { });
+builder.Services.AddEgressPool();
 builder.Services.AddHttpClient("egress").UseEgressPool();
 ```
 
