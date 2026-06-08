@@ -25,6 +25,18 @@ public sealed class AutoPrefixDetectionTests
     }
 
     [Fact]
+    public async Task RentAddressAsync_CreateForTestsWithNullOptions_UsesDetectedPrefixByDefault()
+    {
+        FakeEgressNetworkPlatform platform = new();
+        platform.AllocatedPrefixes.Add(IPNetwork.Parse("127.0.0.1/32"));
+
+        using EgressPool pool = EgressPool.CreateForTests(options: null, platform);
+        await using EgressAddressLease lease = await pool.RentAddressAsync();
+
+        Assert.Equal(IPAddress.Loopback, lease.Address);
+    }
+
+    [Fact]
     public void CreateForTests_AutoDetectPrefixes_AddsManagedRoutesForConfiguredAndDetectedPrefixes()
     {
         FakeEgressNetworkPlatform platform = new();

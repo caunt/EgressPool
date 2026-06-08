@@ -16,29 +16,25 @@ Use it when an application needs its outbound connections to appear from differe
 ## Quick Start
 
 ```csharp
-using System.Net;
 using Egress;
 
-EgressPoolOptions options = new()
-{
-    Prefixes = [IPNetwork.Parse("127.0.0.0/8")],
-};
-
-await using EgressPool pool = await EgressPool.CreateAsync(options);
+await using EgressPool pool = await EgressPool.CreateAsync();
 using HttpClient client = pool.CreateHttpClient();
 
 string response = await client.GetStringAsync("http://127.0.0.1:5000/");
 ```
 
-To use prefixes already allocated on local interfaces without configuring manual prefixes:
+To merge auto-detected prefixes with manual prefixes:
 
 ```csharp
 EgressPoolOptions options = new()
 {
+    Prefixes = [IPNetwork.Parse("127.0.0.0/8")],
+    AutoDetectPrefixes = true,
 };
-```
 
-Set `AutoDetectPrefixes = true` when you want to merge auto-detected prefixes with manually configured prefixes.
+await using EgressPool pool = await EgressPool.CreateAsync(options);
+```
 
 Detected prefixes are merged into the same pool as configured prefixes. Destination-aware TCP, HTTP, `RentAddressAsync(IPAddress)`, and `CreateUdpClient(IPAddress)` calls prefer prefixes with the same address scope as the destination, then verify candidates with a UDP bind/connect probe before selecting one.
 
@@ -49,17 +45,3 @@ When a logger is supplied directly or through dependency injection, `EgressPool`
 Each outbound connection receives a source address from the configured pool. When the connection, client, or pool is disposed, the address is no longer held by that caller.
 
 Some configurations may require operating system support or elevated permissions. If the requested behavior is not available on the current machine, pool creation or connection creation fails with an exception.
-
-## Cleanup
-
-Dispose the pool when the application is finished with it:
-
-```csharp
-await pool.DisposeAsync();
-```
-
-If an application exits unexpectedly, release anything left behind by a previous process:
-
-```csharp
-await EgressPool.CleanupStaleStateAsync();
-```

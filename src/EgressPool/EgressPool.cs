@@ -37,24 +37,25 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
     /// <summary>
     /// Creates and initializes a new egress pool.
     /// </summary>
-    /// <param name="options">The egress pool options.</param>
+    /// <param name="options">The egress pool options. Default options are used when this is <see langword="null" />.</param>
     /// <param name="cancellationToken">A cancellation token.</param>
     /// <returns>The initialized egress pool.</returns>
-    public static ValueTask<EgressPool> CreateAsync(EgressPoolOptions options, CancellationToken cancellationToken = default) =>
+    public static ValueTask<EgressPool> CreateAsync(EgressPoolOptions? options = null, CancellationToken cancellationToken = default) =>
         CreateAsync(options, logger: null, cancellationToken);
 
     /// <summary>
     /// Creates and initializes a new egress pool.
     /// </summary>
-    /// <param name="options">The egress pool options.</param>
+    /// <param name="options">The egress pool options. Default options are used when this is <see langword="null" />.</param>
     /// <param name="logger">The logger used for trace diagnostics.</param>
     /// <param name="cancellationToken">A cancellation token.</param>
     /// <returns>The initialized egress pool.</returns>
-    public static ValueTask<EgressPool> CreateAsync(EgressPoolOptions options, ILogger<EgressPool>? logger, CancellationToken cancellationToken = default)
+    public static ValueTask<EgressPool> CreateAsync(EgressPoolOptions? options, ILogger<EgressPool>? logger, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        EgressPool pool = new(options, EgressPlatform.Create(), logger);
+        EgressPoolOptions resolvedOptions = options ?? new EgressPoolOptions();
+        EgressPool pool = new(resolvedOptions, EgressPlatform.Create(), logger);
         if (pool.options.Cleanup.RecoverStaleOwnedStateOnCreate)
         {
             pool.CleanupStaleState(cancellationToken);
@@ -341,9 +342,10 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
         return ValueTask.CompletedTask;
     }
 
-    internal static EgressPool CreateForTests(EgressPoolOptions options, IEgressNetworkPlatform platform, ILogger<EgressPool>? logger = null)
+    internal static EgressPool CreateForTests(EgressPoolOptions? options, IEgressNetworkPlatform platform, ILogger<EgressPool>? logger = null)
     {
-        EgressPool pool = new(options, platform, logger);
+        EgressPoolOptions resolvedOptions = options ?? new EgressPoolOptions();
+        EgressPool pool = new(resolvedOptions, platform, logger);
         try
         {
             pool.Initialize();
