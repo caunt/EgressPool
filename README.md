@@ -24,6 +24,27 @@ using HttpClient client = pool.CreateHttpClient();
 string response = await client.GetStringAsync("http://127.0.0.1:5000/");
 ```
 
+## Dependency Injection
+
+Install the `EgressPool.DependencyInjection` package and register the pool with your service collection:
+
+```csharp
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+
+HostApplicationBuilder builder = Host.CreateApplicationBuilder(args);
+
+builder.Services.AddEgressPool(options => { });
+builder.Services.AddHttpClient("egress").UseEgressPool();
+
+IHost host = builder.Build();
+
+IHttpClientFactory httpClientFactory = host.Services.GetRequiredService<IHttpClientFactory>();
+using HttpClient httpClient = httpClientFactory.CreateClient("egress");
+
+string response = await httpClient.GetStringAsync("http://127.0.0.1:5000/");
+```
+
 ## Expected Behavior
 
 Each outbound connection receives a source address from the configured pool. When the connection, client, or pool is disposed, the address is no longer held by that caller.
