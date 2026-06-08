@@ -57,7 +57,7 @@ public sealed class AutoPrefixDetectionTests
     }
 
     [Fact]
-    public void CreateForTests_ManualPrefixesWithoutAutoDetect_DoesNotAddDetectedRoutes()
+    public void CreateForTests_ManualPrefixesConfigured_OnlyAddsManualPrefixRoutes()
     {
         FakeEgressNetworkPlatform platform = new();
         platform.AllocatedPrefixes.Add(IPNetwork.Parse("127.65.0.0/16"));
