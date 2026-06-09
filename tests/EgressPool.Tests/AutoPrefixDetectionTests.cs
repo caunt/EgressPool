@@ -57,6 +57,54 @@ public sealed class AutoPrefixDetectionTests
     }
 
     [Fact]
+    public void CreateForTests_AutoDetectPrefixes_DeduplicatesDetectedPrefixes()
+    {
+        FakeEgressNetworkPlatform platform = new();
+        TestLogger<EgressPool> logger = new();
+        platform.AllocatedPrefixes.Add(IPNetwork.Parse("127.65.0.0/16"));
+        platform.AllocatedPrefixes.Add(IPNetwork.Parse("127.65.0.0/16"));
+        platform.AllocatedPrefixes.Add(new IPNetwork(IPAddress.Parse("127.65.12.34"), 16));
+        platform.AllocatedPrefixes.Add(IPNetwork.Parse("127.65.1.1/32"));
+        EgressPoolOptions options = TestOptions.Create(
+            EgressAddressMode.NonLocalBind,
+            EgressInterfaceSelectionMode.Explicit,
+            [IPNetwork.Parse("127.64.0.0/16")]) with
+        {
+            AutoDetectPrefixes = true,
+        };
+
+        using EgressPool pool = EgressPool.CreateForTests(options, platform, logger);
+
+        Assert.Equal(3, platform.EnsureLocalRouteCallCount);
+        Assert.Contains(platform.AddedLocalRoutes, route => route.Prefix.Equals(IPNetwork.Parse("127.64.0.0/16")));
+        Assert.Contains(platform.AddedLocalRoutes, route => route.Prefix.Equals(IPNetwork.Parse("127.65.0.0/16")));
+        Assert.Contains(platform.AddedLocalRoutes, route => route.Prefix.Equals(IPNetwork.Parse("127.65.1.1/32")));
+
+        string message = Assert.Single(logger.Messages, message => message.StartsWith("Auto-detected egress prefixes:", StringComparison.Ordinal));
+        Assert.Equal("Auto-detected egress prefixes: 127.65.0.0/16, 127.65.1.1/32.", message);
+    }
+
+    [Fact]
+    public void CreateForTests_AutoDetectPrefixes_DeduplicatesIpv6ScopeIds()
+    {
+        byte[] linkLocalAddressBytes = IPAddress.Parse("fe80::").GetAddressBytes();
+        FakeEgressNetworkPlatform platform = new();
+        platform.AllocatedPrefixes.Add(new IPNetwork(new IPAddress(linkLocalAddressBytes, 1), 64));
+        platform.AllocatedPrefixes.Add(new IPNetwork(new IPAddress(linkLocalAddressBytes, 2), 64));
+        EgressPoolOptions options = TestOptions.Create(
+            EgressAddressMode.NonLocalBind,
+            EgressInterfaceSelectionMode.Explicit,
+            []) with
+        {
+            AutoDetectPrefixes = true,
+        };
+
+        using EgressPool pool = EgressPool.CreateForTests(options, platform);
+
+        Assert.Equal(1, platform.EnsureLocalRouteCallCount);
+    }
+
+    [Fact]
     public void CreateForTests_ManualPrefixesConfigured_OnlyAddsManualPrefixRoutes()
     {
         FakeEgressNetworkPlatform platform = new();

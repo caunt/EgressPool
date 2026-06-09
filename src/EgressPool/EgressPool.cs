@@ -969,30 +969,22 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
     private static EgressPrefix[] CreateEffectivePrefixes(EgressPoolOptions options, IEgressNetworkPlatform platform, ILogger<EgressPool>? logger)
     {
         List<EgressPrefix> effectivePrefixes = [];
-        HashSet<IPNetwork> seenPrefixes = [];
+        HashSet<NetworkPrefixKey> seenPrefixes = [];
 
         for (int prefixIndex = 0; prefixIndex < options.Prefixes.Count; prefixIndex++)
         {
-            IPNetwork prefix = options.Prefixes[prefixIndex];
-            if (seenPrefixes.Add(prefix))
-            {
-                effectivePrefixes.Add(new EgressPrefix(prefix, EgressPrefixSource.Configured));
-            }
+            AddEffectivePrefix(effectivePrefixes, seenPrefixes, options.Prefixes[prefixIndex], EgressPrefixSource.Configured);
         }
 
         if (ShouldAutoDetectPrefixes(options))
         {
             IReadOnlyList<IPNetwork> detectedPrefixes = platform.GetAllocatedPrefixes();
-            logger?.LogTrace("Auto-detected egress prefixes: {DetectedPrefixes}.", FormatNetworks(detectedPrefixes));
+            IReadOnlyList<IPNetwork> distinctDetectedPrefixes = GetDistinctNetworks(detectedPrefixes);
+            logger?.LogTrace("Auto-detected egress prefixes: {DetectedPrefixes}.", FormatNetworks(distinctDetectedPrefixes));
 
-            for (int detectedPrefixIndex = 0; detectedPrefixIndex < detectedPrefixes.Count; detectedPrefixIndex++)
+            for (int detectedPrefixIndex = 0; detectedPrefixIndex < distinctDetectedPrefixes.Count; detectedPrefixIndex++)
             {
-                IPNetwork detectedPrefix = detectedPrefixes[detectedPrefixIndex];
-                ValidateAddressFamily(detectedPrefix.BaseAddress.AddressFamily);
-                if (seenPrefixes.Add(detectedPrefix))
-                {
-                    effectivePrefixes.Add(new EgressPrefix(detectedPrefix, EgressPrefixSource.AutoDetected));
-                }
+                AddEffectivePrefix(effectivePrefixes, seenPrefixes, distinctDetectedPrefixes[detectedPrefixIndex], EgressPrefixSource.AutoDetected);
             }
         }
 
@@ -1002,6 +994,37 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
         }
 
         return effectivePrefixes.ToArray();
+    }
+
+    private static void AddEffectivePrefix(List<EgressPrefix> effectivePrefixes, HashSet<NetworkPrefixKey> seenPrefixes, IPNetwork prefix, EgressPrefixSource source)
+    {
+        if (seenPrefixes.Add(NetworkPrefixKey.Create(prefix)))
+        {
+            effectivePrefixes.Add(new EgressPrefix(prefix, source));
+        }
+    }
+
+    private static IReadOnlyList<IPNetwork> GetDistinctNetworks(IReadOnlyList<IPNetwork> networks)
+    {
+        if (networks.Count == 0)
+        {
+            return Array.Empty<IPNetwork>();
+        }
+
+        List<IPNetwork> distinctNetworks = [];
+        HashSet<NetworkPrefixKey> seenNetworks = [];
+
+        for (int networkIndex = 0; networkIndex < networks.Count; networkIndex++)
+        {
+            IPNetwork network = networks[networkIndex];
+            ValidateAddressFamily(network.BaseAddress.AddressFamily);
+            if (seenNetworks.Add(NetworkPrefixKey.Create(network)))
+            {
+                distinctNetworks.Add(network);
+            }
+        }
+
+        return distinctNetworks;
     }
 
     private static EgressPoolOptions ValidateOptions(EgressPoolOptions options)
@@ -1068,6 +1091,81 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
         }
 
         return string.Join(", ", networkDescriptions);
+    }
+
+    private readonly struct NetworkPrefixKey : IEquatable<NetworkPrefixKey>
+    {
+        private readonly AddressFamily addressFamily;
+        private readonly int prefixLength;
+        private readonly UInt128 networkAddress;
+
+        private NetworkPrefixKey(AddressFamily addressFamily, int prefixLength, UInt128 networkAddress)
+        {
+            this.addressFamily = addressFamily;
+            this.prefixLength = prefixLength;
+            this.networkAddress = networkAddress;
+        }
+
+        internal static NetworkPrefixKey Create(IPNetwork network)
+        {
+            AddressFamily addressFamily = network.BaseAddress.AddressFamily;
+            ValidateAddressFamily(addressFamily);
+
+            int addressByteCount = addressFamily == AddressFamily.InterNetwork ? 4 : 16;
+            int maximumPrefixLength = addressByteCount * 8;
+            if (network.PrefixLength < 0 || network.PrefixLength > maximumPrefixLength)
+            {
+                throw new ArgumentOutOfRangeException(nameof(network), network.PrefixLength, $"Prefix length must be between 0 and {maximumPrefixLength}.");
+            }
+
+            Span<byte> addressBytes = stackalloc byte[addressByteCount];
+            if (!network.BaseAddress.TryWriteBytes(addressBytes, out int bytesWritten) || bytesWritten != addressByteCount)
+            {
+                throw new InvalidOperationException($"Could not write address bytes for {network.BaseAddress}.");
+            }
+
+            ClearHostBits(addressBytes, network.PrefixLength);
+
+            UInt128 networkAddress = 0;
+            for (int byteIndex = 0; byteIndex < addressBytes.Length; byteIndex++)
+            {
+                networkAddress = (networkAddress << 8) | addressBytes[byteIndex];
+            }
+
+            return new NetworkPrefixKey(addressFamily, network.PrefixLength, networkAddress);
+        }
+
+        public bool Equals(NetworkPrefixKey other) =>
+            addressFamily == other.addressFamily &&
+            prefixLength == other.prefixLength &&
+            networkAddress == other.networkAddress;
+
+        public override bool Equals(object? obj) =>
+            obj is NetworkPrefixKey other && Equals(other);
+
+        public override int GetHashCode() =>
+            HashCode.Combine(addressFamily, prefixLength, networkAddress);
+
+        private static void ClearHostBits(Span<byte> addressBytes, int prefixLength)
+        {
+            int fullPrefixByteCount = prefixLength / 8;
+            int remainingPrefixBitCount = prefixLength % 8;
+
+            if (fullPrefixByteCount >= addressBytes.Length)
+            {
+                return;
+            }
+
+            int hostStartByteIndex = fullPrefixByteCount;
+            if (remainingPrefixBitCount > 0)
+            {
+                int prefixMask = 0xFF << (8 - remainingPrefixBitCount);
+                addressBytes[hostStartByteIndex] = (byte)(addressBytes[hostStartByteIndex] & prefixMask);
+                hostStartByteIndex++;
+            }
+
+            addressBytes[hostStartByteIndex..].Clear();
+        }
     }
 
     private readonly record struct SelectedEgressAddress(
