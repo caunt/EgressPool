@@ -428,7 +428,7 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
 
                 if (CanConnectFromSourceAddress(probeLease, destinationAddress, out Exception? probeException))
                 {
-                    logger?.LogTrace(
+                    logger?.LogDebug(
                         "Selected egress prefix {Prefix} from {PrefixSource} with source address {SourceAddress} for destination {DestinationAddress}.",
                         candidatePrefix.Network,
                         candidatePrefix.Source,
