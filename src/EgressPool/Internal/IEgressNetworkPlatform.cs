@@ -15,7 +15,7 @@ internal interface IEgressNetworkPlatform
 
     string GetRouteInterface(IPAddress destinationAddress);
 
-    IReadOnlyList<IPNetwork> GetAllocatedPrefixes();
+    IReadOnlyList<NetworkInterfaceAddress> GetAllocatedAddresses();
 
     IReadOnlyList<NetworkInterfaceAddress> GetAssignedAddresses(string interfaceName, AddressFamily addressFamily);
 

@@ -20,7 +20,8 @@ public sealed class EgressAddressLease : IDisposable, IAsyncDisposable
         int prefixLength,
         Action release,
         IActiveResourceTracker? activeResourceTracker = null,
-        bool usesAutoDetectedPrefix = false)
+        bool usesAutoDetectedPrefix = false,
+        bool usesNonLocalBind = false)
     {
         Address = address;
         InterfaceName = interfaceName;
@@ -29,6 +30,7 @@ public sealed class EgressAddressLease : IDisposable, IAsyncDisposable
         this.release = release;
         this.activeResourceTracker = activeResourceTracker;
         UsesAutoDetectedPrefix = usesAutoDetectedPrefix;
+        UsesNonLocalBind = usesNonLocalBind;
     }
 
     /// <summary>
@@ -52,6 +54,8 @@ public sealed class EgressAddressLease : IDisposable, IAsyncDisposable
     public AddressFamily AddressFamily { get; }
 
     internal bool UsesAutoDetectedPrefix { get; }
+
+    internal bool UsesNonLocalBind { get; }
 
     /// <summary>
     /// Gets a value indicating whether the lease has been disposed.

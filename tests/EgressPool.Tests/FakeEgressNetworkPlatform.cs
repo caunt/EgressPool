@@ -14,6 +14,8 @@ internal sealed class FakeEgressNetworkPlatform : IEgressNetworkPlatform
 
     internal List<IPNetwork> AllocatedPrefixes { get; } = [];
 
+    internal List<NetworkInterfaceAddress> AllocatedAddresses { get; } = [];
+
     internal List<FakeAssignedAddressRequest> AssignedAddressRequests { get; } = [];
 
     internal List<AddressFamily> EnabledNonLocalBindFamilies { get; } = [];
@@ -76,7 +78,27 @@ internal sealed class FakeEgressNetworkPlatform : IEgressNetworkPlatform
         return PerDestinationRouteInterfaceName;
     }
 
-    public IReadOnlyList<IPNetwork> GetAllocatedPrefixes() => AllocatedPrefixes;
+    public IReadOnlyList<NetworkInterfaceAddress> GetAllocatedAddresses()
+    {
+        if (AllocatedAddresses.Count == 0 && AllocatedPrefixes.Count == 0)
+        {
+            return Array.Empty<NetworkInterfaceAddress>();
+        }
+
+        NetworkInterfaceAddress[] addresses = new NetworkInterfaceAddress[AllocatedAddresses.Count + AllocatedPrefixes.Count];
+        for (int addressIndex = 0; addressIndex < AllocatedAddresses.Count; addressIndex++)
+        {
+            addresses[addressIndex] = AllocatedAddresses[addressIndex];
+        }
+
+        for (int prefixIndex = 0; prefixIndex < AllocatedPrefixes.Count; prefixIndex++)
+        {
+            IPNetwork prefix = AllocatedPrefixes[prefixIndex];
+            addresses[AllocatedAddresses.Count + prefixIndex] = new NetworkInterfaceAddress(prefix.BaseAddress, prefix.PrefixLength);
+        }
+
+        return addresses;
+    }
 
     public IReadOnlyList<NetworkInterfaceAddress> GetAssignedAddresses(string interfaceName, AddressFamily addressFamily)
     {

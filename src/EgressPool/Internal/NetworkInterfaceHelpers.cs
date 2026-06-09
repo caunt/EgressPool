@@ -61,10 +61,10 @@ internal static class NetworkInterfaceHelpers
         return matchingAddresses;
     }
 
-    internal static IReadOnlyList<IPNetwork> GetAllocatedPrefixes()
+    internal static IReadOnlyList<NetworkInterfaceAddress> GetAllocatedAddresses()
     {
         NetworkInterface[] networkInterfaces = NetworkInterface.GetAllNetworkInterfaces();
-        List<IPNetwork> prefixes = [];
+        List<NetworkInterfaceAddress> addresses = [];
 
         for (int networkInterfaceIndex = 0; networkInterfaceIndex < networkInterfaces.Length; networkInterfaceIndex++)
         {
@@ -89,11 +89,11 @@ internal static class NetworkInterfaceHelpers
                     continue;
                 }
 
-                prefixes.Add(new IPNetwork(addressInformation.Address, prefixLength));
+                addresses.Add(new NetworkInterfaceAddress(addressInformation.Address, prefixLength));
             }
         }
 
-        return prefixes;
+        return addresses;
     }
 
     internal static NetworkInterface ResolveInterface(string interfaceName)

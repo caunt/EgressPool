@@ -348,7 +348,10 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
 
         foreach (EgressPrefix prefix in prefixes)
         {
-            localRouteLeases.Add(AcquireLocalRoute(prefix.Network, options.LocalRouteInterfaceName));
+            if (PrefixAllowsTrueNonLocalBind(prefix))
+            {
+                localRouteLeases.Add(AcquireLocalRoute(prefix.Network, options.LocalRouteInterfaceName));
+            }
         }
     }
 
@@ -382,7 +385,7 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
             EgressPrefix prefix = SelectRandomPrefix(requestedAddressFamily);
             IPAddress selectedAddress = AddressSelector.SelectRandom(prefix.Network);
             int leasePrefixLength = GetHostPrefixLength(requestedAddressFamily);
-            IDisposable assignmentLease = AcquireAddressIfRequired(interfaceName, selectedAddress, leasePrefixLength);
+            IDisposable assignmentLease = AcquireAddressIfRequired(interfaceName, selectedAddress, leasePrefixLength, prefix);
             return new SelectedEgressAddress(selectedAddress, leasePrefixLength, prefix, assignmentLease);
         }
 
@@ -390,7 +393,7 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
         {
             IPAddress selectedAddress = AddressSelector.SelectRandom(singleConfiguredPrefix.Network);
             int leasePrefixLength = GetHostPrefixLength(requestedAddressFamily);
-            IDisposable assignmentLease = AcquireAddressIfRequired(interfaceName, selectedAddress, leasePrefixLength);
+            IDisposable assignmentLease = AcquireAddressIfRequired(interfaceName, selectedAddress, leasePrefixLength, singleConfiguredPrefix);
             return new SelectedEgressAddress(selectedAddress, leasePrefixLength, singleConfiguredPrefix, assignmentLease);
         }
 
@@ -414,13 +417,14 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
 
             try
             {
-                assignmentLease = AcquireAddressIfRequired(interfaceName, selectedAddress, leasePrefixLength);
+                assignmentLease = AcquireAddressIfRequired(interfaceName, selectedAddress, leasePrefixLength, candidatePrefix);
                 EgressAddressLease probeLease = new(
                     selectedAddress,
                     interfaceName,
                     leasePrefixLength,
                     assignmentLease.Dispose,
-                    usesAutoDetectedPrefix: candidatePrefix.IsAutoDetected);
+                    usesAutoDetectedPrefix: candidatePrefix.IsAutoDetected,
+                    usesNonLocalBind: ShouldUseTrueNonLocalBind(candidatePrefix));
 
                 if (CanConnectFromSourceAddress(probeLease, destinationAddress, out Exception? probeException))
                 {
@@ -527,7 +531,8 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
             selectedAddress.LeasePrefixLength,
             selectedAddress.AssignmentLease.Dispose,
             activeResourceTracker,
-            selectedAddress.Prefix.IsAutoDetected);
+            selectedAddress.Prefix.IsAutoDetected,
+            ShouldUseTrueNonLocalBind(selectedAddress.Prefix));
 
     private EgressPrefix SelectRandomPrefix(AddressFamily requestedAddressFamily)
     {
@@ -654,10 +659,10 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
         return false;
     }
 
-    private IDisposable AcquireAddressIfRequired(string interfaceName, IPAddress address, int prefixLength)
+    private IDisposable AcquireAddressIfRequired(string interfaceName, IPAddress address, int prefixLength, EgressPrefix prefix)
     {
         if (options.AddressMode == EgressAddressMode.AssignOnDemand ||
-            (options.AddressMode == EgressAddressMode.NonLocalBind && !platform.SupportsTrueNonLocalBind))
+            (options.AddressMode == EgressAddressMode.NonLocalBind && !ShouldUseTrueNonLocalBind(prefix)))
         {
             return AcquireAddress(interfaceName, address, prefixLength);
         }
@@ -774,12 +779,9 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
 
     private void PrepareSocket(Socket socket, EgressAddressLease lease)
     {
-        if (options.AddressMode == EgressAddressMode.NonLocalBind)
+        if (lease.UsesNonLocalBind)
         {
-            if (platform.SupportsTrueNonLocalBind)
-            {
-                platform.EnableNonLocalBind(socket, lease.AddressFamily);
-            }
+            platform.EnableNonLocalBind(socket, lease.AddressFamily);
         }
     }
 
@@ -978,8 +980,8 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
 
         if (ShouldAutoDetectPrefixes(options))
         {
-            IReadOnlyList<IPNetwork> detectedPrefixes = platform.GetAllocatedPrefixes();
-            IReadOnlyList<IPNetwork> distinctDetectedPrefixes = GetDistinctNetworks(detectedPrefixes);
+            IReadOnlyList<NetworkInterfaceAddress> detectedAddresses = platform.GetAllocatedAddresses();
+            IReadOnlyList<IPNetwork> distinctDetectedPrefixes = GetDistinctAutoDetectedNetworks(detectedAddresses);
             logger?.LogTrace("Auto-detected egress prefixes: {DetectedPrefixes}.", FormatNetworks(distinctDetectedPrefixes));
 
             for (int detectedPrefixIndex = 0; detectedPrefixIndex < distinctDetectedPrefixes.Count; detectedPrefixIndex++)
@@ -1004,9 +1006,9 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
         }
     }
 
-    private static IReadOnlyList<IPNetwork> GetDistinctNetworks(IReadOnlyList<IPNetwork> networks)
+    private static IReadOnlyList<IPNetwork> GetDistinctAutoDetectedNetworks(IReadOnlyList<NetworkInterfaceAddress> addresses)
     {
-        if (networks.Count == 0)
+        if (addresses.Count == 0)
         {
             return Array.Empty<IPNetwork>();
         }
@@ -1014,17 +1016,29 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
         List<IPNetwork> distinctNetworks = [];
         HashSet<NetworkPrefixKey> seenNetworks = [];
 
-        for (int networkIndex = 0; networkIndex < networks.Count; networkIndex++)
+        for (int addressIndex = 0; addressIndex < addresses.Count; addressIndex++)
         {
-            IPNetwork network = networks[networkIndex];
-            ValidateAddressFamily(network.BaseAddress.AddressFamily);
-            if (seenNetworks.Add(NetworkPrefixKey.Create(network)))
+            NetworkInterfaceAddress address = addresses[addressIndex];
+            ValidateAddressFamily(address.Address.AddressFamily);
+            IPNetwork effectiveNetwork = CreateAutoDetectedNetwork(address);
+            if (seenNetworks.Add(NetworkPrefixKey.Create(effectiveNetwork)))
             {
-                distinctNetworks.Add(network);
+                distinctNetworks.Add(effectiveNetwork);
             }
         }
 
         return distinctNetworks;
+    }
+
+    private static IPNetwork CreateAutoDetectedNetwork(NetworkInterfaceAddress detectedAddress)
+    {
+        IPAddress address = detectedAddress.Address;
+        if (AutoDetectedPrefixAllowsTrueNonLocalBind(address))
+        {
+            return new IPNetwork(address, detectedAddress.PrefixLength);
+        }
+
+        return new IPNetwork(address, GetHostPrefixLength(address.AddressFamily));
     }
 
     private static EgressPoolOptions ValidateOptions(EgressPoolOptions options)
@@ -1076,6 +1090,20 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
 
     private static bool ShouldAutoDetectPrefixes(EgressPoolOptions options) =>
         options.AutoDetectPrefixes || options.Prefixes.Count == 0;
+
+    private bool ShouldUseTrueNonLocalBind(EgressPrefix prefix) =>
+        options.AddressMode == EgressAddressMode.NonLocalBind &&
+        platform.SupportsTrueNonLocalBind &&
+        PrefixAllowsTrueNonLocalBind(prefix);
+
+    private static bool PrefixAllowsTrueNonLocalBind(EgressPrefix prefix) =>
+        !prefix.IsAutoDetected || AutoDetectedPrefixAllowsTrueNonLocalBind(prefix.Network.BaseAddress);
+
+    private static bool AutoDetectedPrefixAllowsTrueNonLocalBind(IPAddress address)
+    {
+        IPAddressScope scope = IPAddressScopeClassifier.GetScope(address);
+        return scope is IPAddressScope.Global or IPAddressScope.Loopback;
+    }
 
     private static string FormatNetworks(IReadOnlyList<IPNetwork> networks)
     {

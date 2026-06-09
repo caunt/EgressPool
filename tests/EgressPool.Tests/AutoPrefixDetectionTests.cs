@@ -85,12 +85,12 @@ public sealed class AutoPrefixDetectionTests
     }
 
     [Fact]
-    public void CreateForTests_AutoDetectPrefixes_DeduplicatesIpv6ScopeIds()
+    public async Task RentAddressAsync_AutoDetectPrefixes_DeduplicatesIpv6ScopeIdsAndHostifiesLinkLocalPrefixes()
     {
         byte[] linkLocalAddressBytes = IPAddress.Parse("fe80::").GetAddressBytes();
         FakeEgressNetworkPlatform platform = new();
-        platform.AllocatedPrefixes.Add(new IPNetwork(new IPAddress(linkLocalAddressBytes, 1), 64));
-        platform.AllocatedPrefixes.Add(new IPNetwork(new IPAddress(linkLocalAddressBytes, 2), 64));
+        platform.AllocatedAddresses.Add(new NetworkInterfaceAddress(new IPAddress(linkLocalAddressBytes, 1), 64));
+        platform.AllocatedAddresses.Add(new NetworkInterfaceAddress(new IPAddress(linkLocalAddressBytes, 2), 64));
         EgressPoolOptions options = TestOptions.Create(
             EgressAddressMode.NonLocalBind,
             EgressInterfaceSelectionMode.Explicit,
@@ -100,8 +100,96 @@ public sealed class AutoPrefixDetectionTests
         };
 
         using EgressPool pool = EgressPool.CreateForTests(options, platform);
+        await using EgressAddressLease lease = await pool.RentAddressAsync();
 
-        Assert.Equal(1, platform.EnsureLocalRouteCallCount);
+        Assert.Equal(IPAddress.Parse("fe80::"), lease.Address);
+        Assert.Equal(128, lease.PrefixLength);
+        Assert.True(lease.UsesAutoDetectedPrefix);
+        Assert.False(lease.UsesNonLocalBind);
+        Assert.Equal(0, platform.EnsureLocalRouteCallCount);
+        Assert.Equal(1, platform.AddAddressCallCount);
+        Assert.Equal(128, Assert.Single(platform.AddedAddresses).PrefixLength);
+    }
+
+    [Theory]
+    [InlineData("10.42.1.7", 24, 32)]
+    [InlineData("100.64.1.7", 24, 32)]
+    [InlineData("169.254.1.7", 16, 32)]
+    [InlineData("fd00::42", 64, 128)]
+    public async Task RentAddressAsync_AutoDetectedNonGlobalPrefix_UsesAssignedHostAddressWithoutManagedRoute(
+        string assignedAddressText,
+        int detectedPrefixLength,
+        int expectedLeasePrefixLength)
+    {
+        IPAddress assignedAddress = IPAddress.Parse(assignedAddressText);
+        FakeEgressNetworkPlatform platform = new();
+        platform.AllocatedAddresses.Add(new NetworkInterfaceAddress(assignedAddress, detectedPrefixLength));
+        EgressPoolOptions options = TestOptions.Create(
+            EgressAddressMode.NonLocalBind,
+            EgressInterfaceSelectionMode.Explicit,
+            []) with
+        {
+            AutoDetectPrefixes = true,
+        };
+
+        using EgressPool pool = EgressPool.CreateForTests(options, platform);
+        await using EgressAddressLease lease = await pool.RentAddressAsync();
+
+        Assert.Equal(assignedAddress, lease.Address);
+        Assert.Equal(expectedLeasePrefixLength, lease.PrefixLength);
+        Assert.True(lease.UsesAutoDetectedPrefix);
+        Assert.False(lease.UsesNonLocalBind);
+        Assert.Equal(0, platform.EnsureLocalRouteCallCount);
+        FakeAddressOperation addedAddress = Assert.Single(platform.AddedAddresses);
+        Assert.Equal(assignedAddress, addedAddress.Address);
+        Assert.Equal(expectedLeasePrefixLength, addedAddress.PrefixLength);
+    }
+
+    [Theory]
+    [InlineData("8.8.8.8", 24)]
+    [InlineData("127.65.12.34", 16)]
+    public async Task RentAddressAsync_AutoDetectedGlobalOrLoopbackPrefix_KeepsNonLocalBindAndManagedRoute(
+        string assignedAddressText,
+        int detectedPrefixLength)
+    {
+        IPAddress assignedAddress = IPAddress.Parse(assignedAddressText);
+        FakeEgressNetworkPlatform platform = new();
+        platform.AllocatedAddresses.Add(new NetworkInterfaceAddress(assignedAddress, detectedPrefixLength));
+        EgressPoolOptions options = TestOptions.Create(
+            EgressAddressMode.NonLocalBind,
+            EgressInterfaceSelectionMode.Explicit,
+            []) with
+        {
+            AutoDetectPrefixes = true,
+        };
+
+        using EgressPool pool = EgressPool.CreateForTests(options, platform);
+        await using EgressAddressLease lease = await pool.RentAddressAsync();
+
+        Assert.True(lease.UsesAutoDetectedPrefix);
+        Assert.True(lease.UsesNonLocalBind);
+        Assert.Equal(0, platform.AddAddressCallCount);
+        FakeRouteOperation addedRoute = Assert.Single(platform.AddedLocalRoutes);
+        Assert.Equal(detectedPrefixLength, addedRoute.Prefix.PrefixLength);
+        Assert.True(addedRoute.Prefix.Contains(assignedAddress));
+    }
+
+    [Fact]
+    public async Task RentAddressAsync_ConfiguredPrivatePrefix_KeepsNonLocalBindAndManagedRoute()
+    {
+        FakeEgressNetworkPlatform platform = new();
+        EgressPoolOptions options = TestOptions.Create(
+            EgressAddressMode.NonLocalBind,
+            EgressInterfaceSelectionMode.Explicit,
+            [IPNetwork.Parse("10.42.0.0/24")]);
+
+        using EgressPool pool = EgressPool.CreateForTests(options, platform);
+        await using EgressAddressLease lease = await pool.RentAddressAsync();
+
+        Assert.False(lease.UsesAutoDetectedPrefix);
+        Assert.True(lease.UsesNonLocalBind);
+        Assert.Equal(0, platform.AddAddressCallCount);
+        Assert.Contains(platform.AddedLocalRoutes, route => route.Prefix.Equals(IPNetwork.Parse("10.42.0.0/24")));
     }
 
     [Fact]

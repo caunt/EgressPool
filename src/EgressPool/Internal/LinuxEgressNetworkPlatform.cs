@@ -77,8 +77,8 @@ internal sealed class LinuxEgressNetworkPlatform : IEgressNetworkPlatform
         throw new InvalidOperationException($"Could not map local route address {localEndPoint.Address} to a network interface.");
     }
 
-    public IReadOnlyList<IPNetwork> GetAllocatedPrefixes() =>
-        NetworkInterfaceHelpers.GetAllocatedPrefixes();
+    public IReadOnlyList<NetworkInterfaceAddress> GetAllocatedAddresses() =>
+        NetworkInterfaceHelpers.GetAllocatedAddresses();
 
     public IReadOnlyList<NetworkInterfaceAddress> GetAssignedAddresses(string interfaceName, AddressFamily addressFamily) =>
         NetworkInterfaceHelpers.GetAssignedAddressesByName(interfaceName, addressFamily);
