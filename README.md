@@ -33,6 +33,32 @@ builder.Services.AddEgressPool();
 builder.Services.AddHttpClient("egress").UseEgressPool();
 ```
 
+## Running in Containers
+
+When running inside a container, the following requirements must be met:
+
+- **Host network mode** – the container must use the host network stack (`--network host` in Docker) so that the pool can see and bind to the host's network interfaces.
+- **Root user** – the process must run as root (`--user root` or `USER root` in the Dockerfile).
+- **NET_ADMIN capability** – the container must be granted the `NET_ADMIN` Linux capability (`--cap-add NET_ADMIN` in Docker) so that the pool can configure source addresses on the interfaces.
+
+Example `docker run` command:
+
+```bash
+docker run --network host --user root --cap-add NET_ADMIN your-image
+```
+
+Or in a `docker-compose.yml`:
+
+```yaml
+services:
+  app:
+    image: your-image
+    network_mode: host
+    user: root
+    cap_add:
+      - NET_ADMIN
+```
+
 ## Expected Behavior
 
 Each outbound connection receives a source address from the configured pool. When the connection, client, or pool is disposed, the address is no longer held by that caller.
