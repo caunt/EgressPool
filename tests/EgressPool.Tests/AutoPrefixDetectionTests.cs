@@ -57,7 +57,7 @@ public sealed class AutoPrefixDetectionTests
     }
 
     [Fact]
-    public void CreateForTests_AutoDetectPrefixes_DeduplicatesDetectedPrefixes()
+    public void CreateForTests_AutoDetectPrefixes_DeduplicatesAndRemovesContainedDetectedPrefixes()
     {
         FakeEgressNetworkPlatform platform = new();
         TestLogger<EgressPool> logger = new();
@@ -75,13 +75,60 @@ public sealed class AutoPrefixDetectionTests
 
         using EgressPool pool = EgressPool.CreateForTests(options, platform, logger);
 
-        Assert.Equal(3, platform.EnsureLocalRouteCallCount);
+        Assert.Equal(2, platform.EnsureLocalRouteCallCount);
         Assert.Contains(platform.AddedLocalRoutes, route => route.Prefix.Equals(IPNetwork.Parse("127.64.0.0/16")));
         Assert.Contains(platform.AddedLocalRoutes, route => route.Prefix.Equals(IPNetwork.Parse("127.65.0.0/16")));
-        Assert.Contains(platform.AddedLocalRoutes, route => route.Prefix.Equals(IPNetwork.Parse("127.65.1.1/32")));
+        Assert.DoesNotContain(platform.AddedLocalRoutes, route => route.Prefix.Equals(IPNetwork.Parse("127.65.1.1/32")));
 
         string message = Assert.Single(logger.Messages, message => message.StartsWith("Auto-detected egress prefixes:", StringComparison.Ordinal));
-        Assert.Equal("Auto-detected egress prefixes: 127.65.0.0/16, 127.65.1.1/32.", message);
+        Assert.Equal("Auto-detected egress prefixes: 127.65.0.0/16.", message);
+    }
+
+    [Fact]
+    public void CreateForTests_AutoDetectPrefixes_RemovesContainedIpv6DetectedHostPrefixes()
+    {
+        FakeEgressNetworkPlatform platform = new();
+        TestLogger<EgressPool> logger = new();
+        platform.AllocatedPrefixes.Add(IPNetwork.Parse("2a0c:8fc3:6441:719:5de4:2018:61d:934d/128"));
+        platform.AllocatedPrefixes.Add(IPNetwork.Parse("2a0c:8fc3:6441:1196:61fe:8f3d:5a58:436b/128"));
+        platform.AllocatedPrefixes.Add(IPNetwork.Parse("2a0c:8fc3:6441:826b:6773:8ef1:23bb:b68e/128"));
+        platform.AllocatedPrefixes.Add(IPNetwork.Parse("2a0c:8fc3:6441::/48"));
+        EgressPoolOptions options = TestOptions.Create(
+            EgressAddressMode.NonLocalBind,
+            EgressInterfaceSelectionMode.Explicit,
+            []) with
+        {
+            AutoDetectPrefixes = true,
+        };
+
+        using EgressPool pool = EgressPool.CreateForTests(options, platform, logger);
+
+        FakeRouteOperation addedRoute = Assert.Single(platform.AddedLocalRoutes);
+        Assert.Equal(IPNetwork.Parse("2a0c:8fc3:6441::/48"), addedRoute.Prefix);
+
+        string message = Assert.Single(logger.Messages, message => message.StartsWith("Auto-detected egress prefixes:", StringComparison.Ordinal));
+        Assert.Equal("Auto-detected egress prefixes: 2a0c:8fc3:6441::/48.", message);
+    }
+
+    [Fact]
+    public void CreateForTests_AutoDetectPrefixes_KeepsConfiguredPrefixOverlappingDetectedPrefix()
+    {
+        FakeEgressNetworkPlatform platform = new();
+        platform.AllocatedPrefixes.Add(IPNetwork.Parse("2a0c:8fc3:6441::/48"));
+        IPNetwork configuredPrefix = IPNetwork.Parse("2a0c:8fc3:6441:719:5de4:2018:61d:934d/128");
+        EgressPoolOptions options = TestOptions.Create(
+            EgressAddressMode.NonLocalBind,
+            EgressInterfaceSelectionMode.Explicit,
+            [configuredPrefix]) with
+        {
+            AutoDetectPrefixes = true,
+        };
+
+        using EgressPool pool = EgressPool.CreateForTests(options, platform);
+
+        Assert.Equal(2, platform.EnsureLocalRouteCallCount);
+        Assert.Contains(platform.AddedLocalRoutes, route => route.Prefix.Equals(configuredPrefix));
+        Assert.Contains(platform.AddedLocalRoutes, route => route.Prefix.Equals(IPNetwork.Parse("2a0c:8fc3:6441::/48")));
     }
 
     [Fact]

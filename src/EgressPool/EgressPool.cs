@@ -1027,8 +1027,52 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
             }
         }
 
-        return distinctNetworks;
+        return RemoveContainedNetworks(distinctNetworks);
     }
+
+    private static IReadOnlyList<IPNetwork> RemoveContainedNetworks(IReadOnlyList<IPNetwork> networks)
+    {
+        if (networks.Count < 2)
+        {
+            return networks;
+        }
+
+        bool[] removedNetworks = new bool[networks.Count];
+        for (int candidateIndex = 0; candidateIndex < networks.Count; candidateIndex++)
+        {
+            IPNetwork candidateNetwork = networks[candidateIndex];
+            for (int containingIndex = 0; containingIndex < networks.Count; containingIndex++)
+            {
+                if (candidateIndex == containingIndex)
+                {
+                    continue;
+                }
+
+                IPNetwork containingNetwork = networks[containingIndex];
+                if (NetworkContainsNetwork(containingNetwork, candidateNetwork))
+                {
+                    removedNetworks[candidateIndex] = true;
+                    break;
+                }
+            }
+        }
+
+        List<IPNetwork> effectiveNetworks = [];
+        for (int networkIndex = 0; networkIndex < networks.Count; networkIndex++)
+        {
+            if (!removedNetworks[networkIndex])
+            {
+                effectiveNetworks.Add(networks[networkIndex]);
+            }
+        }
+
+        return effectiveNetworks;
+    }
+
+    private static bool NetworkContainsNetwork(IPNetwork containingNetwork, IPNetwork candidateNetwork) =>
+        containingNetwork.BaseAddress.AddressFamily == candidateNetwork.BaseAddress.AddressFamily &&
+        containingNetwork.PrefixLength < candidateNetwork.PrefixLength &&
+        AddressSelector.Contains(containingNetwork, candidateNetwork.BaseAddress);
 
     private static IPNetwork CreateAutoDetectedNetwork(NetworkInterfaceAddress detectedAddress)
     {
