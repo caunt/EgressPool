@@ -25,6 +25,7 @@ internal static class NetlinkClient
     private const byte RtProtocolStatic = 4;
     private const byte RtScopeHost = 254;
     private const byte RtTypeLocal = 2;
+    private const byte IfaFNodad = 0x02;
     private const ushort IfaAddress = 1;
     private const ushort IfaLocal = 2;
     private const ushort RtaDestination = 1;
@@ -105,7 +106,7 @@ internal static class NetlinkClient
         writer.WriteNetlinkHeader(messageType, flags, messageSequence);
         writer.WriteByte(addressFamily);
         writer.WriteByte(checked((byte)prefixLength));
-        writer.WriteByte(0);
+        writer.WriteByte(GetAddressFlags(messageType, address.AddressFamily));
         writer.WriteByte(0);
         writer.WriteInt32(interfaceIndex);
         writer.WriteAttribute(IfaLocal, addressBytes[..addressByteCount]);
@@ -113,6 +114,9 @@ internal static class NetlinkClient
 
         return writer.Complete();
     }
+
+    private static byte GetAddressFlags(ushort messageType, AddressFamily addressFamily) =>
+        messageType == RtmNewAddress && addressFamily == AddressFamily.InterNetworkV6 ? IfaFNodad : (byte)0;
 
     internal static int BuildRouteMessage(Span<byte> messageBuffer, ushort messageType, ushort flags, uint messageSequence, int interfaceIndex, IPNetwork prefix)
     {

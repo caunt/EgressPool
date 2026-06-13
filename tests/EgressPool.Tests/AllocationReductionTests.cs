@@ -49,6 +49,8 @@ public sealed class AllocationReductionTests
         Assert.Equal((uint)123, BinaryPrimitives.ReadUInt32LittleEndian(messageBuffer[8..]));
         Assert.Equal((byte)2, messageBuffer[16]);
         Assert.Equal((byte)32, messageBuffer[17]);
+        Assert.Equal((byte)0, messageBuffer[18]);
+        Assert.Equal((byte)0, messageBuffer[19]);
         Assert.Equal(7, BinaryPrimitives.ReadInt32LittleEndian(messageBuffer[20..]));
         Assert.Equal((ushort)8, BinaryPrimitives.ReadUInt16LittleEndian(messageBuffer[24..]));
         Assert.Equal((ushort)2, BinaryPrimitives.ReadUInt16LittleEndian(messageBuffer[26..]));
@@ -62,6 +64,61 @@ public sealed class AllocationReductionTests
         Assert.Equal((byte)0, messageBuffer[37]);
         Assert.Equal((byte)2, messageBuffer[38]);
         Assert.Equal((byte)8, messageBuffer[39]);
+    }
+
+    [Fact]
+    public void BuildAddressMessage_WritesNodadForIpv6AddNetlinkMessage()
+    {
+        IPAddress address = IPAddress.Parse("fd7a:e677:ee50:514d::47");
+        var messageBuffer = (stackalloc byte[256]);
+
+        int messageLength = NetlinkClient.BuildAddressMessage(
+            messageBuffer,
+            messageType: 20,
+            flags: 0x405,
+            messageSequence: 124,
+            interfaceIndex: 7,
+            address,
+            prefixLength: 128);
+
+        Assert.Equal(64, messageLength);
+        Assert.Equal((uint)messageLength, BinaryPrimitives.ReadUInt32LittleEndian(messageBuffer));
+        Assert.Equal((ushort)20, BinaryPrimitives.ReadUInt16LittleEndian(messageBuffer[4..]));
+        Assert.Equal((ushort)0x405, BinaryPrimitives.ReadUInt16LittleEndian(messageBuffer[6..]));
+        Assert.Equal((uint)124, BinaryPrimitives.ReadUInt32LittleEndian(messageBuffer[8..]));
+        Assert.Equal((byte)10, messageBuffer[16]);
+        Assert.Equal((byte)128, messageBuffer[17]);
+        Assert.Equal((byte)0x02, messageBuffer[18]);
+        Assert.Equal((byte)0, messageBuffer[19]);
+        Assert.Equal(7, BinaryPrimitives.ReadInt32LittleEndian(messageBuffer[20..]));
+        Assert.Equal((ushort)20, BinaryPrimitives.ReadUInt16LittleEndian(messageBuffer[24..]));
+        Assert.Equal((ushort)2, BinaryPrimitives.ReadUInt16LittleEndian(messageBuffer[26..]));
+        Assert.Equal([0xfd, 0x7a, 0xe6, 0x77, 0xee, 0x50, 0x51, 0x4d, 0, 0, 0, 0, 0, 0, 0, 0x47], messageBuffer[28..44].ToArray());
+        Assert.Equal((ushort)20, BinaryPrimitives.ReadUInt16LittleEndian(messageBuffer[44..]));
+        Assert.Equal((ushort)1, BinaryPrimitives.ReadUInt16LittleEndian(messageBuffer[46..]));
+        Assert.Equal([0xfd, 0x7a, 0xe6, 0x77, 0xee, 0x50, 0x51, 0x4d, 0, 0, 0, 0, 0, 0, 0, 0x47], messageBuffer[48..64].ToArray());
+    }
+
+    [Fact]
+    public void BuildAddressMessage_DoesNotWriteNodadForIpv6DeleteNetlinkMessage()
+    {
+        IPAddress address = IPAddress.Parse("fd7a:e677:ee50:514d::47");
+        var messageBuffer = (stackalloc byte[256]);
+
+        int messageLength = NetlinkClient.BuildAddressMessage(
+            messageBuffer,
+            messageType: 21,
+            flags: 0x05,
+            messageSequence: 125,
+            interfaceIndex: 7,
+            address,
+            prefixLength: 128);
+
+        Assert.Equal(64, messageLength);
+        Assert.Equal((byte)10, messageBuffer[16]);
+        Assert.Equal((byte)128, messageBuffer[17]);
+        Assert.Equal((byte)0, messageBuffer[18]);
+        Assert.Equal((byte)0, messageBuffer[19]);
     }
 
     [Fact]
