@@ -16,12 +16,6 @@ internal static class PlatformTestHelpers
 
     internal static bool IsLinux => RuntimeInformation.IsOSPlatform(OSPlatform.Linux);
 
-    internal static bool IsMacOs => RuntimeInformation.IsOSPlatform(OSPlatform.OSX);
-
-    internal static bool IsWindows => RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
-
-    internal static bool IsCi => string.Equals(Environment.GetEnvironmentVariable("GITHUB_ACTIONS"), "true", StringComparison.OrdinalIgnoreCase);
-
     internal static async Task WaitUntilAsync(Func<bool> predicate, TimeSpan timeout)
     {
         using CancellationTokenSource timeoutTokenSource = new(timeout);

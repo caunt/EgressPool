@@ -113,7 +113,6 @@ internal sealed class LoopbackHttpServer : IAsyncDisposable
     private readonly CancellationTokenSource stopTokenSource = new();
     private readonly ConcurrentBag<TcpClient> clients = [];
     private readonly ConcurrentBag<Task> connectionTasks = [];
-    private readonly ConcurrentQueue<IPEndPoint> remoteEndPoints = [];
     private readonly bool closeAfterResponse;
     private readonly Task acceptLoopTask;
     private int requestCount;
@@ -130,9 +129,6 @@ internal sealed class LoopbackHttpServer : IAsyncDisposable
     internal string Url { get; }
 
     internal int RequestCount => Volatile.Read(ref requestCount);
-
-    internal bool TryDequeueRemoteEndPoint(out IPEndPoint? remoteEndPoint) =>
-        remoteEndPoints.TryDequeue(out remoteEndPoint);
 
     public async ValueTask DisposeAsync()
     {
@@ -246,11 +242,6 @@ internal sealed class LoopbackHttpServer : IAsyncDisposable
                     {
                         break;
                     }
-                }
-
-                if (client.Client.RemoteEndPoint is IPEndPoint remoteEndPoint)
-                {
-                    remoteEndPoints.Enqueue(remoteEndPoint);
                 }
 
                 Interlocked.Increment(ref requestCount);

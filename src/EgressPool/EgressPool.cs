@@ -189,7 +189,7 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
     {
         ThrowIfDisposed();
 
-        AddressFamily addressFamily = ResolveAddressFamily(null);
+        AddressFamily addressFamily = ResolveAddressFamily();
         return CreateUdpClient(addressFamily, null);
     }
 
@@ -251,7 +251,7 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
         cancellationToken.ThrowIfCancellationRequested();
         ThrowIfDisposed();
 
-        AddressFamily addressFamily = ResolveAddressFamily(null);
+        AddressFamily addressFamily = ResolveAddressFamily();
         return ValueTask.FromResult(RentAddress(addressFamily, null, trackStandaloneLease: true));
     }
 
@@ -871,14 +871,8 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
         }
     }
 
-    private AddressFamily ResolveAddressFamily(AddressFamily? requestedAddressFamily)
+    private AddressFamily ResolveAddressFamily()
     {
-        if (requestedAddressFamily is { } explicitAddressFamily)
-        {
-            ValidateAddressFamily(explicitAddressFamily);
-            return explicitAddressFamily;
-        }
-
         if (options.DefaultAddressFamily is { } defaultAddressFamily)
         {
             return defaultAddressFamily;

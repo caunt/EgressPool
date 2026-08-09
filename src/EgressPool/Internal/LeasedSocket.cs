@@ -3,7 +3,7 @@ using System.Threading;
 
 namespace Egress.Internal;
 
-internal sealed class LeasedSocket(EgressAddressLease lease, IActiveResourceTracker? activeResourceTracker, AddressFamily addressFamily, SocketType socketType, ProtocolType protocolType)
+internal sealed class LeasedSocket(EgressAddressLease lease, IActiveResourceTracker activeResourceTracker, AddressFamily addressFamily, SocketType socketType, ProtocolType protocolType)
     : Socket(addressFamily, socketType, protocolType)
 {
     private int disposed;
@@ -24,7 +24,7 @@ internal sealed class LeasedSocket(EgressAddressLease lease, IActiveResourceTrac
                 }
                 finally
                 {
-                    activeResourceTracker?.UnregisterActive(this);
+                    activeResourceTracker.UnregisterActive(this);
                 }
             }
         }

@@ -7,42 +7,6 @@ namespace Egress.Internal;
 
 internal static class AddressSelector
 {
-    internal static IPAddress SelectRandom(IReadOnlyList<IPNetwork> prefixes, AddressFamily addressFamily)
-    {
-        int matchingPrefixCount = 0;
-        for (int prefixIndex = 0; prefixIndex < prefixes.Count; prefixIndex++)
-        {
-            if (prefixes[prefixIndex].BaseAddress.AddressFamily == addressFamily)
-            {
-                matchingPrefixCount++;
-            }
-        }
-
-        if (matchingPrefixCount == 0)
-        {
-            throw new InvalidOperationException($"No configured prefix matches address family {addressFamily}.");
-        }
-
-        int selectedMatchIndex = RandomNumberGenerator.GetInt32(matchingPrefixCount);
-        for (int prefixIndex = 0; prefixIndex < prefixes.Count; prefixIndex++)
-        {
-            IPNetwork prefix = prefixes[prefixIndex];
-            if (prefix.BaseAddress.AddressFamily != addressFamily)
-            {
-                continue;
-            }
-
-            if (selectedMatchIndex == 0)
-            {
-                return SelectRandom(prefix);
-            }
-
-            selectedMatchIndex--;
-        }
-
-        throw new InvalidOperationException($"No configured prefix matches address family {addressFamily}.");
-    }
-
     internal static IPAddress SelectRandom(IPNetwork prefix)
     {
         var candidateBytesBuffer = (stackalloc byte[16]);

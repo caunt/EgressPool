@@ -10,10 +10,10 @@ namespace Egress;
 /// </summary>
 public sealed class EgressUdpClient : IDisposable, IAsyncDisposable
 {
-    private readonly IActiveResourceTracker? activeResourceTracker;
+    private readonly IActiveResourceTracker activeResourceTracker;
     private int disposeStarted;
 
-    internal EgressUdpClient(Socket socket, EgressAddressLease lease, IActiveResourceTracker? activeResourceTracker = null)
+    internal EgressUdpClient(Socket socket, EgressAddressLease lease, IActiveResourceTracker activeResourceTracker)
     {
         Socket = socket;
         Lease = lease;
@@ -70,7 +70,7 @@ public sealed class EgressUdpClient : IDisposable, IAsyncDisposable
         }
         finally
         {
-            activeResourceTracker?.UnregisterActive(this);
+            activeResourceTracker.UnregisterActive(this);
         }
     }
 
