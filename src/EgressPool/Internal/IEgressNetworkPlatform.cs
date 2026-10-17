@@ -22,4 +22,6 @@ internal interface IEgressNetworkPlatform
     PlatformNetworkStateLease AddAddress(string interfaceName, IPAddress address, int prefixLength);
 
     PlatformNetworkStateLease EnsureLocalRoute(IPNetwork prefix, string interfaceName);
+
+    ValueTask<AddressWarmUpResult> WarmUpAddressAsync(string interfaceName, IPAddress address, TimeSpan timeout, CancellationToken cancellationToken);
 }

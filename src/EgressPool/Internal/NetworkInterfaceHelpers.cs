@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
@@ -109,6 +110,42 @@ internal static class NetworkInterfaceHelpers
         }
 
         throw new InvalidOperationException($"Could not resolve network interface '{interfaceName}'.");
+    }
+
+    internal static bool TryGetIpv6Gateway(string interfaceName, [NotNullWhen(true)] out IPAddress? gatewayAddress)
+    {
+        NetworkInterface[] networkInterfaces = NetworkInterface.GetAllNetworkInterfaces();
+        for (int networkInterfaceIndex = 0; networkInterfaceIndex < networkInterfaces.Length; networkInterfaceIndex++)
+        {
+            NetworkInterface networkInterface = networkInterfaces[networkInterfaceIndex];
+            if (!IsMatchingInterface(networkInterface, interfaceName, matchInterfaceId: true))
+            {
+                continue;
+            }
+
+            IPInterfaceProperties properties = networkInterface.GetIPProperties();
+            foreach (GatewayIPAddressInformation gatewayInformation in properties.GatewayAddresses)
+            {
+                IPAddress candidateAddress = gatewayInformation.Address;
+                if (candidateAddress.AddressFamily != AddressFamily.InterNetworkV6 || candidateAddress.Equals(IPAddress.IPv6Any))
+                {
+                    continue;
+                }
+
+                if (candidateAddress.IsIPv6LinkLocal && candidateAddress.ScopeId == 0)
+                {
+                    candidateAddress = new IPAddress(candidateAddress.GetAddressBytes(), properties.GetIPv6Properties().Index);
+                }
+
+                gatewayAddress = candidateAddress;
+                return true;
+            }
+
+            break;
+        }
+
+        gatewayAddress = null;
+        return false;
     }
 
     internal static IReadOnlyList<NetworkInterfaceAddress> GetAssignedAddressesByName(string interfaceName, AddressFamily addressFamily)

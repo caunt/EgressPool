@@ -60,6 +60,12 @@ internal sealed class FakeEgressNetworkPlatform : IEgressNetworkPlatform
 
     internal Action? BeforeAddAddressReturns { get; set; }
 
+    internal List<FakeWarmUpRequest> WarmUpRequests { get; } = [];
+
+    internal AddressWarmUpResult WarmUpResult { get; set; } = AddressWarmUpResult.Skipped;
+
+    internal Func<FakeWarmUpRequest, CancellationToken, ValueTask<AddressWarmUpResult>>? WarmUpHandler { get; set; }
+
     public void EnableNonLocalBind(Socket socket, AddressFamily addressFamily)
     {
         EnableNonLocalBindCallCount++;
@@ -173,6 +179,14 @@ internal sealed class FakeEgressNetworkPlatform : IEgressNetworkPlatform
         return new PlatformNetworkStateLease(true, new ActionDisposable(() => DeleteLocalRoute(operation)));
     }
 
+    public ValueTask<AddressWarmUpResult> WarmUpAddressAsync(string interfaceName, IPAddress address, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        FakeWarmUpRequest request = new(interfaceName, address, timeout);
+        WarmUpRequests.Add(request);
+
+        return WarmUpHandler?.Invoke(request, cancellationToken) ?? ValueTask.FromResult(WarmUpResult);
+    }
+
     private void DeleteAddress(FakeAddressOperation operation)
     {
         DeleteAddressCallCount++;
@@ -201,3 +215,5 @@ internal sealed record FakeAssignedAddressRequest(string InterfaceName, AddressF
 internal sealed record FakeAddressOperation(string InterfaceName, IPAddress Address, int PrefixLength);
 
 internal sealed record FakeRouteOperation(string InterfaceName, IPNetwork Prefix);
+
+internal sealed record FakeWarmUpRequest(string InterfaceName, IPAddress Address, TimeSpan Timeout);

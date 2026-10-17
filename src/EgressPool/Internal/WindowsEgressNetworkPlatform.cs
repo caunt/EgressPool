@@ -41,6 +41,9 @@ internal sealed class WindowsEgressNetworkPlatform : IEgressNetworkPlatform
     public PlatformNetworkStateLease EnsureLocalRoute(IPNetwork prefix, string interfaceName) =>
         PlatformNetworkStateLease.NotCreated;
 
+    public ValueTask<AddressWarmUpResult> WarmUpAddressAsync(string interfaceName, IPAddress address, TimeSpan timeout, CancellationToken cancellationToken) =>
+        AddressWarmUp.WarmUpAsync(interfaceName, address, timeout, cancellationToken);
+
     private static uint GetInterfaceIndex(string interfaceName, AddressFamily addressFamily)
     {
         NetworkInterface networkInterface = NetworkInterfaceHelpers.ResolveInterface(interfaceName);

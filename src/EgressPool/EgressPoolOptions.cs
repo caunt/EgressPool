@@ -54,4 +54,17 @@ public sealed record EgressPoolOptions
     /// </summary>
     public string LocalRouteInterfaceName { get; set; } = "lo";
 
+    /// <summary>
+    /// Gets a value indicating whether each IPv6 address that the pool assigns to an interface is warmed up before use
+    /// by sending one ICMPv6 echo request from that address to the interface's IPv6 gateway.
+    /// Routers that resolve on-link addresses on demand otherwise often drop replies to the first connection from a new address.
+    /// A failed warm-up is logged and never fails the lease.
+    /// </summary>
+    public bool WarmUpAssignedAddresses { get; set; } = true;
+
+    /// <summary>
+    /// Gets the maximum time to wait for the gateway's echo reply when warming up an assigned IPv6 address.
+    /// After repeated missing replies on an interface, warm-ups there send the echo request without waiting for a while.
+    /// </summary>
+    public TimeSpan AddressWarmUpTimeout { get; set; } = TimeSpan.FromSeconds(1);
 }

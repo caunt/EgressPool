@@ -29,4 +29,7 @@ internal sealed class UnsupportedEgressNetworkPlatform : IEgressNetworkPlatform
 
     public PlatformNetworkStateLease EnsureLocalRoute(IPNetwork prefix, string interfaceName) =>
         throw new PlatformNotSupportedException("Managed local routes are currently supported only on Linux.");
+
+    public ValueTask<AddressWarmUpResult> WarmUpAddressAsync(string interfaceName, IPAddress address, TimeSpan timeout, CancellationToken cancellationToken) =>
+        ValueTask.FromResult(AddressWarmUpResult.Skipped);
 }

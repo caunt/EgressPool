@@ -109,6 +109,9 @@ internal sealed class LinuxEgressNetworkPlatform : IEgressNetworkPlatform
         return new PlatformNetworkStateLease(true, new ActionDisposable(() => NetlinkClient.DeleteLocalRoute(interfaceIndex, prefix)));
     }
 
+    public ValueTask<AddressWarmUpResult> WarmUpAddressAsync(string interfaceName, IPAddress address, TimeSpan timeout, CancellationToken cancellationToken) =>
+        AddressWarmUp.WarmUpAsync(interfaceName, address, timeout, cancellationToken);
+
     private static int GetInterfaceIndex(string interfaceName)
     {
         uint interfaceIndex = IfNameToIndex(interfaceName);
