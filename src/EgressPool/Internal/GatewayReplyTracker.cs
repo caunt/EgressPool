@@ -27,7 +27,7 @@ internal sealed class GatewayReplyTracker(TimeProvider timeProvider)
                 return GatewayWarmUpDecision.WarmUp;
             }
 
-            if (state.ProbeInFlight || timeProvider.GetUtcNow() < state.NextProbeAt)
+            if (state.ProbeInFlight || timeProvider.GetElapsedTime(state.SilentSinceTimestamp) < ProbeInterval)
             {
                 return GatewayWarmUpDecision.Skip;
             }
@@ -65,7 +65,7 @@ internal sealed class GatewayReplyTracker(TimeProvider timeProvider)
                 return GatewayReplyTransition.None;
             }
 
-            state.NextProbeAt = timeProvider.GetUtcNow() + ProbeInterval;
+            state.SilentSinceTimestamp = timeProvider.GetTimestamp();
             return state.NoReplyCount == SilentThreshold ? GatewayReplyTransition.BecameSilent : GatewayReplyTransition.None;
         }
     }
@@ -75,7 +75,7 @@ internal sealed class GatewayReplyTracker(TimeProvider timeProvider)
         internal bool HasReplied;
         internal int NoReplyCount;
         internal bool ProbeInFlight;
-        internal DateTimeOffset NextProbeAt = DateTimeOffset.MinValue;
+        internal long SilentSinceTimestamp;
     }
 }
 

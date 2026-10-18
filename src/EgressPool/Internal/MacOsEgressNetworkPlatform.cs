@@ -27,7 +27,7 @@ internal sealed class MacOsEgressNetworkPlatform : IEgressNetworkPlatform
                 return route.InterfaceName;
             }
         }
-        catch (Win32Exception)
+        catch (Exception exception) when (exception is Win32Exception or InvalidOperationException)
         {
         }
 
@@ -40,9 +40,12 @@ internal sealed class MacOsEgressNetworkPlatform : IEgressNetworkPlatform
         try
         {
             int interfaceIndex = UnixInterfaceNames.NameToIndex(interfaceName);
-            return MacOsRouting.GetRoute(NetworkInterfaceHelpers.Ipv6DefaultRouteProbe, interfaceIndex)?.Gateway;
+            RouteLookup? route = MacOsRouting.GetRoute(NetworkInterfaceHelpers.Ipv6DefaultRouteProbe, interfaceIndex);
+
+            // Without a route through the requested interface, xnu may answer with the unscoped default route instead.
+            return route is { } scopedRoute && scopedRoute.InterfaceIndex == interfaceIndex ? scopedRoute.Gateway : null;
         }
-        catch (Win32Exception)
+        catch (Exception exception) when (exception is Win32Exception or InvalidOperationException)
         {
             return NetworkInterfaceHelpers.GetIpv6GatewayOrNull(interfaceName);
         }
@@ -63,12 +66,18 @@ internal sealed class MacOsEgressNetworkPlatform : IEgressNetworkPlatform
             return PlatformNetworkStateLease.NotCreated;
         }
 
-        if (address.AddressFamily == AddressFamily.InterNetworkV6)
+        return new PlatformNetworkStateLease(true, new ActionDisposable(() => MacOsNetworkNative.DeleteAddress(interfaceName, address, prefixLength)));
+    }
+
+    public ValueTask<AddressReadiness> WaitUntilAddressReadyAsync(string interfaceName, IPAddress address, int prefixLength, CancellationToken cancellationToken)
+    {
+        // IPv4 aliases are usable as soon as they are added; IPv6 addresses wait for duplicate address detection.
+        if (address.AddressFamily != AddressFamily.InterNetworkV6)
         {
-            MacOsNetworkNative.WaitUntilIpv6AddressIsReady(interfaceName, address, AddressReadyTimeout);
+            return ValueTask.FromResult(AddressReadiness.Ready);
         }
 
-        return new PlatformNetworkStateLease(true, new ActionDisposable(() => MacOsNetworkNative.DeleteAddress(interfaceName, address, prefixLength)));
+        return MacOsNetworkNative.WaitUntilIpv6AddressIsReadyAsync(interfaceName, address, AddressReadyTimeout, cancellationToken);
     }
 
     public PlatformNetworkStateLease EnsureLocalRoute(IPNetwork prefix, string interfaceName) =>

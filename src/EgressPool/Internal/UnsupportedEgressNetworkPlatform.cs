@@ -32,6 +32,9 @@ internal sealed class UnsupportedEgressNetworkPlatform : IEgressNetworkPlatform
 
     public IPAddress? GetIpv6Gateway(string interfaceName) => null;
 
+    public ValueTask<AddressReadiness> WaitUntilAddressReadyAsync(string interfaceName, IPAddress address, int prefixLength, CancellationToken cancellationToken) =>
+        ValueTask.FromResult(AddressReadiness.Ready);
+
     public ValueTask<AddressWarmUpResult> WarmUpAddressAsync(string interfaceName, IPAddress address, IPAddress gateway, TimeSpan timeout, CancellationToken cancellationToken) =>
         ValueTask.FromResult(AddressWarmUpResult.Skipped);
 

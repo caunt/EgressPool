@@ -131,27 +131,35 @@ internal static class NetlinkClient
     /// <summary>
     /// Waits until the kernel routes an address it just added as local. For IPv6 the kernel installs that route
     /// shortly after acknowledging the address, and a reply arriving before then is not delivered to local sockets.
+    /// Polls one netlink socket with short delays, so a slow kernel neither blocks a thread nor burns CPU.
     /// </summary>
-    internal static bool WaitUntilAddressIsLocal(IPAddress address, TimeSpan timeout)
+    internal static async ValueTask<bool> WaitUntilAddressIsLocalAsync(IPAddress address, TimeSpan timeout, CancellationToken cancellationToken)
     {
         long startTimestamp = Stopwatch.GetTimestamp();
         byte[] responseBuffer = new byte[4096];
-        SpinWait spinner = default;
+        int socketFileDescriptor = OpenRequestSocket();
 
-        while (true)
+        try
         {
-            int responseLength = QueryRoute(address, outputInterfaceIndex: 0, responseBuffer);
-            if (responseLength > 0 && TryGetRouteType(responseBuffer.AsSpan(0, responseLength), out byte routeType) && routeType == RtnLocal)
+            while (true)
             {
-                return true;
-            }
+                int responseLength = QueryRoute(socketFileDescriptor, address, outputInterfaceIndex: 0, responseBuffer);
+                if (responseLength > 0 && TryGetRouteType(responseBuffer.AsSpan(0, responseLength), out byte routeType) && routeType == RtnLocal)
+                {
+                    return true;
+                }
 
-            if (Stopwatch.GetElapsedTime(startTimestamp) >= timeout)
-            {
-                return false;
-            }
+                if (Stopwatch.GetElapsedTime(startTimestamp) >= timeout)
+                {
+                    return false;
+                }
 
-            spinner.SpinOnce();
+                await Task.Delay(TimeSpan.FromMilliseconds(1), cancellationToken).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            Close(socketFileDescriptor);
         }
     }
 
@@ -173,10 +181,23 @@ internal static class NetlinkClient
     /// </summary>
     private static int QueryRoute(IPAddress destination, int outputInterfaceIndex, Span<byte> responseBuffer)
     {
+        int socketFileDescriptor = OpenRequestSocket();
+        try
+        {
+            return QueryRoute(socketFileDescriptor, destination, outputInterfaceIndex, responseBuffer);
+        }
+        finally
+        {
+            Close(socketFileDescriptor);
+        }
+    }
+
+    private static int QueryRoute(int socketFileDescriptor, IPAddress destination, int outputInterfaceIndex, Span<byte> responseBuffer)
+    {
         var requestBuffer = (stackalloc byte[128]);
         uint messageSequence = NextSequence();
         int requestLength = BuildGetRouteMessage(requestBuffer, messageSequence, destination, outputInterfaceIndex);
-        int result = SendMessage(requestBuffer[..requestLength], messageSequence, responseBuffer, out int responseLength);
+        int result = SendMessage(socketFileDescriptor, requestBuffer[..requestLength], messageSequence, responseBuffer, out int responseLength);
 
         if (result is -ErrnoNetworkUnreachable or -ErrnoHostUnreachable or -ErrnoNetworkDown or -ErrnoNoSuchProcess or -ErrnoNoEntry)
         {
@@ -389,47 +410,58 @@ internal static class NetlinkClient
     private static int SendMessage(ReadOnlySpan<byte> message, uint messageSequence) =>
         SendMessage(message, messageSequence, Span<byte>.Empty, out _);
 
-    private static unsafe int SendMessage(ReadOnlySpan<byte> message, uint messageSequence, Span<byte> response, out int responseLength)
+    private static int SendMessage(ReadOnlySpan<byte> message, uint messageSequence, Span<byte> response, out int responseLength)
     {
-        int socketFileDescriptor = Socket(AfNetlink, SockRaw, NetlinkRoute);
-        if (socketFileDescriptor < 0)
-        {
-            throw new Win32Exception(Marshal.GetLastPInvokeError(), "Could not open a netlink socket.");
-        }
-
+        int socketFileDescriptor = OpenRequestSocket();
         try
         {
-            SockaddrNetlink destinationAddress = new()
-            {
-                Family = AfNetlink,
-                Groups = 0,
-                Padding = 0,
-                ProcessId = 0,
-            };
-
-            int sentByteCount;
-            fixed (byte* messagePointer = message)
-            {
-                sentByteCount = SendTo(
-                    socketFileDescriptor,
-                    messagePointer,
-                    (nuint)message.Length,
-                    0,
-                    ref destinationAddress,
-                    Marshal.SizeOf<SockaddrNetlink>());
-            }
-
-            if (sentByteCount < 0)
-            {
-                throw new Win32Exception(Marshal.GetLastPInvokeError(), "Could not send a netlink message.");
-            }
-
-            return ReceiveResponse(socketFileDescriptor, messageSequence, response, out responseLength);
+            return SendMessage(socketFileDescriptor, message, messageSequence, response, out responseLength);
         }
         finally
         {
             Close(socketFileDescriptor);
         }
+    }
+
+    private static int OpenRequestSocket()
+    {
+        int socketFileDescriptor = Socket(AfNetlink, SockRaw | SockCloexec, NetlinkRoute);
+        if (socketFileDescriptor < 0)
+        {
+            throw new Win32Exception(Marshal.GetLastPInvokeError(), "Could not open a netlink socket.");
+        }
+
+        return socketFileDescriptor;
+    }
+
+    private static unsafe int SendMessage(int socketFileDescriptor, ReadOnlySpan<byte> message, uint messageSequence, Span<byte> response, out int responseLength)
+    {
+        SockaddrNetlink destinationAddress = new()
+        {
+            Family = AfNetlink,
+            Groups = 0,
+            Padding = 0,
+            ProcessId = 0,
+        };
+
+        int sentByteCount;
+        fixed (byte* messagePointer = message)
+        {
+            sentByteCount = SendTo(
+                socketFileDescriptor,
+                messagePointer,
+                (nuint)message.Length,
+                0,
+                ref destinationAddress,
+                Marshal.SizeOf<SockaddrNetlink>());
+        }
+
+        if (sentByteCount < 0)
+        {
+            throw new Win32Exception(Marshal.GetLastPInvokeError(), "Could not send a netlink message.");
+        }
+
+        return ReceiveResponse(socketFileDescriptor, messageSequence, response, out responseLength);
     }
 
     /// <summary>

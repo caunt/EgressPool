@@ -146,29 +146,30 @@ public sealed class RouteMessageParsingTests
     }
 
     [Fact]
-    public void BuildGetRouteRequest_MacOsScopedIpv6Lookup_WritesInterfaceScope()
+    public void BuildGetRouteRequest_MacOsScopedIpv6Lookup_WritesInterfaceScopeAndAsksForInterface()
     {
-        byte[] request = new byte[MacOsRouting.MessageHeaderLength + 28];
+        byte[] request = new byte[MacOsRouting.MessageHeaderLength + 28 + 20];
 
         int length = MacOsRouting.BuildGetRouteRequest(request, messageSequence: 9, IPAddress.Parse("2001:4860:4860::8888"), scopedInterfaceIndex: 4);
 
-        Assert.Equal(MacOsRouting.MessageHeaderLength + 28, length);
+        Assert.Equal(MacOsRouting.MessageHeaderLength + 28 + 20, length);
         Assert.Equal(length, BinaryPrimitives.ReadUInt16LittleEndian(request));
         Assert.Equal(5, request[2]);
         Assert.Equal(MacOsRouting.RtmGet, request[3]);
         Assert.Equal(4, BinaryPrimitives.ReadUInt16LittleEndian(request.AsSpan(4)));
         Assert.NotEqual(0, BinaryPrimitives.ReadInt32LittleEndian(request.AsSpan(8)) & MacOsRouting.RtfInterfaceScope);
-        Assert.Equal(MacOsRouting.RtaDestination, BinaryPrimitives.ReadInt32LittleEndian(request.AsSpan(12)));
+        Assert.Equal(MacOsRouting.RtaDestination | MacOsRouting.RtaInterface, BinaryPrimitives.ReadInt32LittleEndian(request.AsSpan(12)));
         Assert.Equal(9, BinaryPrimitives.ReadInt32LittleEndian(request.AsSpan(20)));
         Assert.Equal(28, request[MacOsRouting.MessageHeaderLength]);
         Assert.Equal(30, request[MacOsRouting.MessageHeaderLength + 1]);
         Assert.Equal(IPAddress.Parse("2001:4860:4860::8888"), new IPAddress(request.AsSpan(MacOsRouting.MessageHeaderLength + 8, 16)));
+        Assert.Equal([20, 18], request.AsSpan(MacOsRouting.MessageHeaderLength + 28, 2).ToArray());
     }
 
     [Fact]
     public void BuildGetRouteRequest_MacOsScopedLinkLocalDestination_EmbedsScope()
     {
-        byte[] request = new byte[MacOsRouting.MessageHeaderLength + 28];
+        byte[] request = new byte[MacOsRouting.MessageHeaderLength + 28 + 20];
 
         MacOsRouting.BuildGetRouteRequest(request, messageSequence: 1, IPAddress.Parse("fe80::5%6"), scopedInterfaceIndex: 0);
 
@@ -177,23 +178,78 @@ public sealed class RouteMessageParsingTests
     }
 
     [Theory]
-    [InlineData(MacOsRouting.RtmAdd, MacOsRouting.RtfUp | MacOsRouting.RtfGateway | MacOsRouting.RtfStatic, true)]
-    [InlineData(MacOsRouting.RtmDelete, MacOsRouting.RtfUp | MacOsRouting.RtfGateway, true)]
-    [InlineData(MacOsRouting.RtmChange, MacOsRouting.RtfUp, true)]
-    [InlineData(MacOsRouting.RtmAdd, MacOsRouting.RtfUp | MacOsRouting.RtfHost, false)]
-    [InlineData(MacOsRouting.RtmAdd, MacOsRouting.RtfUp | MacOsRouting.RtfLinkLayerInfo, false)]
-    [InlineData(MacOsRouting.RtmNewAddress, 0, false)]
-    [InlineData(MacOsRouting.RtmInterfaceInfo, 0, true)]
-    [InlineData(MacOsRouting.RtmGet, MacOsRouting.RtfUp | MacOsRouting.RtfGateway, false)]
-    public void ContainsRelevantRouteChange_MacOsMessage_IgnoresHostRoutesAndAddresses(byte messageType, int flags, bool expected)
+    [InlineData(MacOsRouting.RtmAdd, MacOsRouting.RtfUp | MacOsRouting.RtfGateway | MacOsRouting.RtfStatic, "::", 0, true)]
+    [InlineData(MacOsRouting.RtmAdd, MacOsRouting.RtfUp, "192.0.2.0", 24, true)]
+    [InlineData(MacOsRouting.RtmDelete, MacOsRouting.RtfUp | MacOsRouting.RtfGateway, "2001:db8::", 64, true)]
+    [InlineData(MacOsRouting.RtmChange, MacOsRouting.RtfUp | MacOsRouting.RtfGateway, "0.0.0.0", 0, true)]
+    [InlineData(MacOsRouting.RtmAdd, MacOsRouting.RtfUp, "198.18.1.2", 32, false)]
+    [InlineData(MacOsRouting.RtmAdd, MacOsRouting.RtfUp, "fd7a::1", 128, false)]
+    [InlineData(MacOsRouting.RtmAdd, MacOsRouting.RtfUp, "198.18.1.2", -1, false)]
+    [InlineData(MacOsRouting.RtmAdd, MacOsRouting.RtfUp | MacOsRouting.RtfHost, "198.18.1.2", 24, false)]
+    [InlineData(MacOsRouting.RtmAdd, MacOsRouting.RtfUp | MacOsRouting.RtfLinkLayerInfo, "192.0.2.7", 24, false)]
+    [InlineData(MacOsRouting.RtmGet, MacOsRouting.RtfUp | MacOsRouting.RtfGateway, "::", 0, false)]
+    public void ContainsRelevantRouteChange_MacOsRouteMessage_IgnoresHostRoutesByFlagOrNetmask(byte messageType, int flags, string destination, int prefixLength, bool expected)
+    {
+        byte[] message = CreateMacOsRouteMessage(messageType, flags, IPAddress.Parse(destination), prefixLength < 0 ? null : prefixLength);
+
+        Assert.Equal(expected, MacOsRouting.ContainsRelevantRouteChange(message));
+    }
+
+    [Theory]
+    [InlineData(MacOsRouting.RtmNewAddress, false)]
+    [InlineData(MacOsRouting.RtmInterfaceInfo, true)]
+    public void ContainsRelevantRouteChange_MacOsNonRouteMessage_ReportsOnlyInterfaceChanges(byte messageType, bool expected)
     {
         byte[] message = new byte[MacOsRouting.MessageHeaderLength];
         BinaryPrimitives.WriteUInt16LittleEndian(message, (ushort)message.Length);
         message[2] = 5;
         message[3] = messageType;
-        BinaryPrimitives.WriteInt32LittleEndian(message.AsSpan(8), flags);
 
         Assert.Equal(expected, MacOsRouting.ContainsRelevantRouteChange(message));
+    }
+
+    [Fact]
+    public void ContainsRelevantRouteChange_MacOsShortenedNetmask_ReadsMissingBytesAsZero()
+    {
+        // xnu shortens netmasks: a /16 IPv4 netmask can arrive with sa_len 6, holding just ff ff.
+        byte[] message = CreateMacOsRouteMessage(MacOsRouting.RtmAdd, MacOsRouting.RtfUp, IPAddress.Parse("10.1.0.0"), netmask: [6, 0, 0, 0, 0xFF, 0xFF]);
+
+        Assert.True(MacOsRouting.ContainsRelevantRouteChange(message));
+    }
+
+    [Fact]
+    public void ContainsRelevantRouteChange_MacOsLeaseRoutesThenDefaultRoute_ReturnsTrue()
+    {
+        byte[] aliasRoute = CreateMacOsRouteMessage(MacOsRouting.RtmAdd, MacOsRouting.RtfUp, IPAddress.Parse("198.18.1.2"), 32);
+        byte[] hostRoute = CreateMacOsRouteMessage(MacOsRouting.RtmAdd, MacOsRouting.RtfUp | MacOsRouting.RtfHost, IPAddress.Parse("fd7a::1"), prefixLength: null);
+        byte[] defaultRoute = CreateMacOsRouteMessage(MacOsRouting.RtmDelete, MacOsRouting.RtfUp | MacOsRouting.RtfGateway, IPAddress.IPv6Any, 0);
+
+        Assert.False(MacOsRouting.ContainsRelevantRouteChange([.. aliasRoute, .. hostRoute]));
+        Assert.True(MacOsRouting.ContainsRelevantRouteChange([.. aliasRoute, .. hostRoute, .. defaultRoute]));
+    }
+
+    [Fact]
+    public void TryParseRouteReply_MacOsReplyWithNetmaskAndInterfaceAddress_UsesReportedInterface()
+    {
+        // rtm_index says 1 (the request's scope), but RTA_IFP reports interface 4, which the gateway's scope must follow.
+        byte[] reply = CreateMacOsRouteReply(
+            interfaceIndex: 1,
+            MacOsRouting.RtfUp | MacOsRouting.RtfGateway,
+            IPAddress.Parse("fe80:4::1"),
+            includeNetmask: true,
+            reportedInterfaceIndex: 4);
+
+        Assert.True(MacOsRouting.TryParseRouteReply(reply, out int interfaceIndex, out IPAddress? gateway));
+        Assert.Equal(4, interfaceIndex);
+        Assert.Equal(IPAddress.Parse("fe80::1%4"), gateway);
+    }
+
+    [Fact]
+    public void TryParseRouteReply_MacOsReplyWithoutInterface_ReturnsFalse()
+    {
+        byte[] reply = CreateMacOsRouteReply(interfaceIndex: 0, MacOsRouting.RtfUp | MacOsRouting.RtfGateway, IPAddress.Parse("192.0.2.1"));
+
+        Assert.False(MacOsRouting.TryParseRouteReply(reply, out _, out _));
     }
 
     [Fact]
@@ -220,6 +276,28 @@ public sealed class RouteMessageParsingTests
         WindowsIpHelper.MibIpForwardRow2 row = CreateWindowsRoute(interfaceIndex: 7, destinationFamily: 2, prefixLength: 8, IPAddress.Any);
 
         Assert.Null(row.GetNextHop());
+    }
+
+    [Theory]
+    [InlineData(1u, 0u, 0, (int)AddressWarmUpStatus.Replied)]
+    [InlineData(1u, 11010u, 0, (int)AddressWarmUpStatus.NoReply)]
+    [InlineData(1u, 11003u, 0, (int)AddressWarmUpStatus.Failed)]
+    [InlineData(0u, 0u, 11010, (int)AddressWarmUpStatus.NoReply)]
+    [InlineData(0u, 0u, 1231, (int)AddressWarmUpStatus.Failed)]
+    [InlineData(0u, 0u, 11002, (int)AddressWarmUpStatus.Failed)]
+    public void ClassifyReply_WindowsEchoCompletion_SeparatesTimeoutsFromFailures(uint replyCount, uint replyStatus, int lastError, int expectedStatus)
+    {
+        Assert.Equal((AddressWarmUpStatus)expectedStatus, WindowsIcmp.ClassifyReply(replyCount, replyStatus, lastError));
+    }
+
+    [Theory]
+    [InlineData(0.4, 1u)]
+    [InlineData(1.0, 1u)]
+    [InlineData(1.2, 2u)]
+    [InlineData(2000.0, 2000u)]
+    public void ToTimeoutMilliseconds_PartialMilliseconds_RoundsUp(double milliseconds, uint expected)
+    {
+        Assert.Equal(expected, WindowsIcmp.ToTimeoutMilliseconds(TimeSpan.FromMilliseconds(milliseconds)));
     }
 
     [Theory]
@@ -270,11 +348,29 @@ public sealed class RouteMessageParsingTests
         }
     }
 
-    private static byte[] CreateMacOsRouteReply(int interfaceIndex, int flags, IPAddress gateway)
+    private static byte[] CreateMacOsRouteReply(int interfaceIndex, int flags, IPAddress gateway, bool includeNetmask = false, int reportedInterfaceIndex = 0)
     {
+        int addresses = MacOsRouting.RtaDestination | MacOsRouting.RtaGateway;
         List<byte> reply = [.. new byte[MacOsRouting.MessageHeaderLength]];
         reply.AddRange(CreateMacOsSocketAddress(IPAddress.Parse("2001:4860:4860::8888")));
         reply.AddRange(CreateMacOsSocketAddress(gateway));
+
+        if (includeNetmask)
+        {
+            // An empty netmask (the default route) is a zero-length socket address that still takes 4 bytes.
+            addresses |= MacOsRouting.RtaNetmask;
+            reply.AddRange(new byte[4]);
+        }
+
+        if (reportedInterfaceIndex != 0)
+        {
+            addresses |= MacOsRouting.RtaInterface;
+            byte[] linkAddress = new byte[20];
+            linkAddress[0] = 20;
+            linkAddress[1] = 18;
+            BinaryPrimitives.WriteUInt16LittleEndian(linkAddress.AsSpan(2), (ushort)reportedInterfaceIndex);
+            reply.AddRange(linkAddress);
+        }
 
         byte[] bytes = [.. reply];
         BinaryPrimitives.WriteUInt16LittleEndian(bytes, (ushort)bytes.Length);
@@ -282,7 +378,53 @@ public sealed class RouteMessageParsingTests
         bytes[3] = MacOsRouting.RtmGet;
         BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(4), (ushort)interfaceIndex);
         BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(8), flags);
-        BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(12), MacOsRouting.RtaDestination | MacOsRouting.RtaGateway);
+        BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(12), addresses);
+        return bytes;
+    }
+
+    private static byte[] CreateMacOsRouteMessage(byte messageType, int flags, IPAddress destination, int? prefixLength)
+    {
+        byte[]? netmask = null;
+        if (prefixLength is { } length)
+        {
+            bool ipv6 = destination.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6;
+            int maskOffset = ipv6 ? 8 : 4;
+            netmask = new byte[length == 0 ? 0 : maskOffset + (ipv6 ? 16 : 4)];
+            if (netmask.Length > 0)
+            {
+                netmask[0] = (byte)netmask.Length;
+                for (int bit = 0; bit < length; bit++)
+                {
+                    netmask[maskOffset + (bit / 8)] |= (byte)(0x80 >> (bit % 8));
+                }
+            }
+        }
+
+        return CreateMacOsRouteMessage(messageType, flags, destination, netmask);
+    }
+
+    private static byte[] CreateMacOsRouteMessage(byte messageType, int flags, IPAddress destination, byte[]? netmask)
+    {
+        int addresses = MacOsRouting.RtaDestination;
+        List<byte> message = [.. new byte[MacOsRouting.MessageHeaderLength]];
+        message.AddRange(CreateMacOsSocketAddress(destination));
+
+        if (netmask is not null)
+        {
+            addresses |= MacOsRouting.RtaNetmask;
+            message.AddRange(netmask.Length == 0 ? new byte[4] : netmask);
+            while (message.Count % 4 != 0)
+            {
+                message.Add(0);
+            }
+        }
+
+        byte[] bytes = [.. message];
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes, (ushort)bytes.Length);
+        bytes[2] = 5;
+        bytes[3] = messageType;
+        BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(8), flags);
+        BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(12), addresses);
         return bytes;
     }
 

@@ -71,6 +71,12 @@ internal sealed class FakeEgressNetworkPlatform : IEgressNetworkPlatform
 
     internal IPAddress? Ipv6Gateway { get; set; } = IPAddress.Parse("fe80::1");
 
+    internal List<FakeAddressOperation> ReadinessRequests { get; } = [];
+
+    internal AddressReadiness AddressReadiness { get; set; } = AddressReadiness.Ready;
+
+    internal Func<FakeAddressOperation, CancellationToken, ValueTask<AddressReadiness>>? ReadinessHandler { get; set; }
+
     internal List<string> GatewayRequests { get; } = [];
 
     internal bool FailRouteChangeMonitor { get; init; }
@@ -202,6 +208,17 @@ internal sealed class FakeEgressNetworkPlatform : IEgressNetworkPlatform
 
         BeforeAddAddressReturns?.Invoke();
         return new PlatformNetworkStateLease(true, new ActionDisposable(() => DeleteAddress(operation)));
+    }
+
+    public ValueTask<AddressReadiness> WaitUntilAddressReadyAsync(string interfaceName, IPAddress address, int prefixLength, CancellationToken cancellationToken)
+    {
+        FakeAddressOperation operation = new(interfaceName, address, prefixLength);
+        lock (syncRoot)
+        {
+            ReadinessRequests.Add(operation);
+        }
+
+        return ReadinessHandler?.Invoke(operation, cancellationToken) ?? ValueTask.FromResult(AddressReadiness);
     }
 
     public PlatformNetworkStateLease EnsureLocalRoute(IPNetwork prefix, string interfaceName)

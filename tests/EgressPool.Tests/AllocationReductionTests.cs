@@ -215,7 +215,7 @@ public sealed class AllocationReductionTests
         Assert.Equal((byte)0, request[73]);
         Assert.Equal([255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255], request[80..96].ToArray());
         AssertZeroes(request[96..100]);
-        Assert.Equal(0x20, BinaryPrimitives.ReadInt32LittleEndian(request[100..]));
+        Assert.Equal(0x200, BinaryPrimitives.ReadInt32LittleEndian(request[100..]));
         AssertZeroes(request[104..120]);
         Assert.Equal(uint.MaxValue, BinaryPrimitives.ReadUInt32LittleEndian(request[120..]));
         Assert.Equal(uint.MaxValue, BinaryPrimitives.ReadUInt32LittleEndian(request[124..]));

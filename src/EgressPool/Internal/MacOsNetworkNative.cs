@@ -27,7 +27,7 @@ internal static class MacOsNetworkNative
     private const int In6IffTentative = 0x02;
     private const int In6IffDuplicated = 0x04;
     private const int In6IffDetached = 0x08;
-    private const int In6IffNoDad = 0x20;
+    private const int In6IffOptimistic = 0x200;
     private const int AliasRequestIpv6FlagsOffset = 100;
     private const int ErrnoExists = 17;
     private const int ErrnoAddressNotAvailable = 49;
@@ -204,57 +204,64 @@ internal static class MacOsNetworkNative
     }
 
     /// <summary>
-    /// Waits until an IPv6 address just added to an interface is usable, that is, neither tentative, duplicated nor detached.
+    /// Waits until an IPv6 address just added to an interface is usable: not tentative, duplicated or detached.
     /// </summary>
-    internal static bool WaitUntilIpv6AddressIsReady(string interfaceName, IPAddress address, TimeSpan timeout)
+    internal static async ValueTask<AddressReadiness> WaitUntilIpv6AddressIsReadyAsync(string interfaceName, IPAddress address, TimeSpan timeout, CancellationToken cancellationToken)
     {
         long startTimestamp = Stopwatch.GetTimestamp();
-        while (true)
-        {
-            if (TryGetIpv6AddressFlags(interfaceName, address, out int flags) &&
-                (flags & (In6IffTentative | In6IffDuplicated | In6IffDetached)) == 0)
-            {
-                return true;
-            }
-
-            if (Stopwatch.GetElapsedTime(startTimestamp) >= timeout)
-            {
-                return false;
-            }
-
-            Thread.Sleep(1);
-        }
-    }
-
-    private static unsafe bool TryGetIpv6AddressFlags(string interfaceName, IPAddress address, out int flags)
-    {
-        flags = 0;
         int socketFileDescriptor = Socket(AfInet6, SockDgram, 0);
         if (socketFileDescriptor < 0)
         {
-            return false;
+            throw new Win32Exception(Marshal.GetLastPInvokeError(), "Could not open an IPv6 ioctl socket.");
         }
 
         try
         {
-            var request = (stackalloc byte[IfRequestIpv6Size]);
-            BuildDeleteAddressIpv6Request(request, interfaceName, address);
-            fixed (byte* requestPointer = request)
+            while (true)
             {
-                if (Ioctl(socketFileDescriptor, SiocgifaflagIn6, requestPointer) != 0)
+                if (TryGetIpv6AddressFlags(socketFileDescriptor, interfaceName, address, out int flags))
                 {
-                    return false;
-                }
-            }
+                    if ((flags & In6IffDuplicated) != 0)
+                    {
+                        return AddressReadiness.Duplicate;
+                    }
 
-            // The kernel replaces the address in the union after the interface name with the address flags.
-            flags = BinaryPrimitives.ReadInt32LittleEndian(request[InterfaceNameSize..]);
-            return true;
+                    if ((flags & (In6IffTentative | In6IffDetached)) == 0)
+                    {
+                        return AddressReadiness.Ready;
+                    }
+                }
+
+                if (Stopwatch.GetElapsedTime(startTimestamp) >= timeout)
+                {
+                    return AddressReadiness.TimedOut;
+                }
+
+                await Task.Delay(TimeSpan.FromMilliseconds(5), cancellationToken).ConfigureAwait(false);
+            }
         }
         finally
         {
             Close(socketFileDescriptor);
         }
+    }
+
+    private static unsafe bool TryGetIpv6AddressFlags(int socketFileDescriptor, string interfaceName, IPAddress address, out int flags)
+    {
+        flags = 0;
+        var request = (stackalloc byte[IfRequestIpv6Size]);
+        BuildDeleteAddressIpv6Request(request, interfaceName, address);
+        fixed (byte* requestPointer = request)
+        {
+            if (Ioctl(socketFileDescriptor, SiocgifaflagIn6, requestPointer) != 0)
+            {
+                return false;
+            }
+        }
+
+        // The kernel replaces the address in the union after the interface name with the address flags.
+        flags = BinaryPrimitives.ReadInt32LittleEndian(request[InterfaceNameSize..]);
+        return true;
     }
 
     internal static int BuildAddAddressIpv4Request(Span<byte> requestBuffer, string interfaceName, IPAddress address, int prefixLength)
@@ -284,8 +291,10 @@ internal static class MacOsNetworkNative
         WriteSockaddrIn6(requestBuffer[16..], address, AfInet6);
         WriteIpv6Mask(requestBuffer[72..], prefixLength);
 
-        // Like Linux (IFA_F_NODAD), skip duplicate address detection: a tentative address cannot be bound for about a second.
-        BinaryPrimitives.WriteInt32LittleEndian(requestBuffer[AliasRequestIpv6FlagsOffset..], In6IffNoDad);
+        // xnu marks a new address tentative (unbindable) until duplicate address detection finishes, about a second.
+        // IN6_IFF_NODAD would leave it tentative forever, because xnu then never starts DAD; an optimistic address
+        // (RFC 4429, enabled for manual addresses by default) is usable at once while DAD still runs.
+        BinaryPrimitives.WriteInt32LittleEndian(requestBuffer[AliasRequestIpv6FlagsOffset..], In6IffOptimistic);
         BinaryPrimitives.WriteUInt32LittleEndian(requestBuffer[120..], InfiniteLifetime);
         BinaryPrimitives.WriteUInt32LittleEndian(requestBuffer[124..], InfiniteLifetime);
         return IfAliasRequestIpv6Size;

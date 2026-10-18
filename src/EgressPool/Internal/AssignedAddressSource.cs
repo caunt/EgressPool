@@ -12,6 +12,7 @@ internal sealed class AssignedAddressSource : IDisposable
     internal static readonly TimeSpan SpareRefreshInterval = TimeSpan.FromSeconds(30);
     internal static readonly TimeSpan IdleTimeout = TimeSpan.FromMinutes(5);
     internal static readonly TimeSpan SpareRetryDelay = TimeSpan.FromSeconds(30);
+    internal const int MaxCreateAttempts = 3;
 
     private readonly object stateLock = new();
     private readonly Queue<AssignedAddress> spares = new();
@@ -24,7 +25,8 @@ internal sealed class AssignedAddressSource : IDisposable
     private AssignedAddress? current;
     private int sparesInFlight;
     private long lastUsedTimestamp;
-    private DateTimeOffset sparesBlockedUntil = DateTimeOffset.MinValue;
+    private long sparesBlockedTimestamp;
+    private bool sparesBlocked;
     private bool disposed;
 
     internal AssignedAddressSource(AddressAssignmentContext context, string interfaceName, IPNetwork prefix, int hostPrefixLength)
@@ -44,7 +46,7 @@ internal sealed class AssignedAddressSource : IDisposable
         if (address is null)
         {
             await context.RateLimiter.WaitAsync(interfaceName, cancellationToken).ConfigureAwait(false);
-            address = TryAcquireExisting() ?? IssueCreatedAddress(CreateAddress());
+            address = TryAcquireExisting() ?? IssueCreatedAddress(await CreateAddressAsync(cancellationToken).ConfigureAwait(false));
         }
 
         RefillSpares();
@@ -217,19 +219,65 @@ internal sealed class AssignedAddressSource : IDisposable
         throw new ObjectDisposedException(typeof(EgressPool).FullName);
     }
 
-    private AssignedAddress CreateAddress()
+    /// <summary>
+    /// Adds a random address from the prefix and waits until the operating system lets it be used.
+    /// An address another host already uses is removed and replaced; one that never becomes usable is removed and reported.
+    /// </summary>
+    private async ValueTask<AssignedAddress> CreateAddressAsync(CancellationToken cancellationToken)
     {
-        IPAddress address = AddressSelector.SelectRandom(prefix);
-        PlatformNetworkStateLease platformLease = context.Platform.AddAddress(interfaceName, address, hostPrefixLength);
-        bool warmUp = platformLease.Created && context.WarmUpService.AppliesTo(address);
+        for (int attempt = 1; ; attempt++)
+        {
+            IPAddress address = AddressSelector.SelectRandom(prefix);
+            PlatformNetworkStateLease platformLease = context.Platform.AddAddress(interfaceName, address, hostPrefixLength);
 
-        return new AssignedAddress(
-            address,
-            interfaceName,
-            platformLease.Disposable,
-            platformLease.Created,
-            context.TimeProvider.GetTimestamp(),
-            warmUp ? StartWarmUp : null);
+            if (platformLease.Created)
+            {
+                AddressReadiness readiness;
+                try
+                {
+                    readiness = await context.Platform.WaitUntilAddressReadyAsync(interfaceName, address, hostPrefixLength, cancellationToken).ConfigureAwait(false);
+                }
+                catch
+                {
+                    platformLease.Disposable.Dispose();
+                    throw;
+                }
+
+                if (readiness is AddressReadiness.Duplicate or AddressReadiness.TimedOut)
+                {
+                    platformLease.Disposable.Dispose();
+                    if (readiness == AddressReadiness.Duplicate && attempt < MaxCreateAttempts)
+                    {
+                        context.Logger?.LogDebug(
+                            "Source address {SourceAddress} is already used on the network of interface {InterfaceName}; trying another address.",
+                            address,
+                            interfaceName);
+                        continue;
+                    }
+
+                    throw new InvalidOperationException(readiness == AddressReadiness.Duplicate
+                        ? $"Duplicate address detection rejected {attempt} source addresses from {prefix} on interface '{interfaceName}', the last one {address}."
+                        : $"Source address {address} did not become usable on interface '{interfaceName}' in time; duplicate address detection did not finish.");
+                }
+
+                if (readiness == AddressReadiness.Unconfirmed)
+                {
+                    context.Logger?.LogDebug(
+                        "Could not confirm in time that source address {SourceAddress} on interface {InterfaceName} is usable; using it anyway.",
+                        address,
+                        interfaceName);
+                }
+            }
+
+            bool warmUp = platformLease.Created && context.WarmUpService.AppliesTo(address);
+            return new AssignedAddress(
+                address,
+                interfaceName,
+                platformLease.Disposable,
+                platformLease.Created,
+                context.TimeProvider.GetTimestamp(),
+                warmUp ? StartWarmUp : null);
+        }
     }
 
     private Task<AddressWarmUpResult> StartWarmUp(AssignedAddress address) =>
@@ -245,7 +293,7 @@ internal sealed class AssignedAddressSource : IDisposable
         int startCount;
         lock (stateLock)
         {
-            if (disposed || context.TimeProvider.GetUtcNow() < sparesBlockedUntil)
+            if (disposed || (sparesBlocked && context.TimeProvider.GetElapsedTime(sparesBlockedTimestamp) < SpareRetryDelay))
             {
                 return;
             }
@@ -271,7 +319,7 @@ internal sealed class AssignedAddressSource : IDisposable
         try
         {
             await context.RateLimiter.WaitAsync(interfaceName, context.LifetimeToken).ConfigureAwait(false);
-            spare = CreateAddress();
+            spare = await CreateAddressAsync(context.LifetimeToken).ConfigureAwait(false);
             if (!spare.CreatedByPool)
             {
                 // The random address already existed on the interface, so it is not ours to hand out or remove.
@@ -368,7 +416,8 @@ internal sealed class AssignedAddressSource : IDisposable
     {
         lock (stateLock)
         {
-            sparesBlockedUntil = context.TimeProvider.GetUtcNow() + SpareRetryDelay;
+            sparesBlocked = true;
+            sparesBlockedTimestamp = context.TimeProvider.GetTimestamp();
         }
     }
 

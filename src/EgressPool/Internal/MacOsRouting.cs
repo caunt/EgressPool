@@ -26,6 +26,8 @@ internal static class MacOsRouting
     internal const byte RtmInterfaceInfo = 0xE;
     internal const int RtaDestination = 0x1;
     internal const int RtaGateway = 0x2;
+    internal const int RtaNetmask = 0x4;
+    internal const int RtaInterface = 0x10;
     internal const int RtfUp = 0x1;
     internal const int RtfGateway = 0x2;
     internal const int RtfHost = 0x4;
@@ -34,6 +36,9 @@ internal static class MacOsRouting
     internal const int RtfInterfaceScope = 0x1000000;
     private const int SockaddrInLength = 16;
     private const int SockaddrIn6Length = 28;
+    private const int SockaddrLinkLength = 20;
+    private const int AfLink = 18;
+    private static readonly TimeSpan ReplyTimeout = TimeSpan.FromSeconds(2);
     private const int ErrnoNoSuchProcess = 3;
     private const int ErrnoNetworkUnreachable = 51;
     private const int ErrnoHostUnreachable = 65;
@@ -58,7 +63,7 @@ internal static class MacOsRouting
             SetReceiveTimeout(socketFileDescriptor);
 
             int messageSequence = Interlocked.Increment(ref sequence);
-            var request = (stackalloc byte[MessageHeaderLength + SockaddrIn6Length]);
+            var request = (stackalloc byte[MessageHeaderLength + SockaddrIn6Length + SockaddrLinkLength]);
             int requestLength = BuildGetRouteRequest(request, messageSequence, destination, scopedInterfaceIndex);
             fixed (byte* requestPointer = request)
             {
@@ -76,8 +81,16 @@ internal static class MacOsRouting
 
             int processId = GetProcessId();
             byte[] reply = new byte[ReplyBufferLength];
+            long startTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
             while (true)
             {
+                // The socket also receives every unrelated routing message, so each read can succeed without ever
+                // delivering the reply (for example after a receive buffer overflow); bound the whole wait.
+                if (System.Diagnostics.Stopwatch.GetElapsedTime(startTimestamp) >= ReplyTimeout)
+                {
+                    throw new InvalidOperationException($"Did not receive the route to {destination} in time.");
+                }
+
                 nint replyLength;
                 fixed (byte* replyPointer = reply)
                 {
@@ -99,9 +112,16 @@ internal static class MacOsRouting
                     continue;
                 }
 
-                if (!TryParseRouteReply(message, out int interfaceIndex, out IPAddress? gateway))
+                int replyErrno = BinaryPrimitives.ReadInt32LittleEndian(message[24..]);
+                if (replyErrno is ErrnoNoSuchProcess or ErrnoNetworkUnreachable or ErrnoHostUnreachable)
                 {
                     return null;
+                }
+
+                if (!TryParseRouteReply(message, out int interfaceIndex, out IPAddress? gateway))
+                {
+                    // Malformed or failed: let the caller fall back to enumerating interfaces.
+                    throw new InvalidOperationException($"Received an unusable route reply for {destination} (errno {replyErrno}).");
                 }
 
                 return new RouteLookup(interfaceIndex, UnixInterfaceNames.IndexToName(interfaceIndex), gateway);
@@ -116,7 +136,7 @@ internal static class MacOsRouting
     internal static int BuildGetRouteRequest(Span<byte> request, int messageSequence, IPAddress destination, int scopedInterfaceIndex)
     {
         int sockaddrLength = destination.AddressFamily == AddressFamily.InterNetworkV6 ? SockaddrIn6Length : SockaddrInLength;
-        int messageLength = MessageHeaderLength + sockaddrLength;
+        int messageLength = MessageHeaderLength + sockaddrLength + SockaddrLinkLength;
         request[..messageLength].Clear();
 
         int flags = RtfUp | RtfGateway | RtfHost | RtfStatic;
@@ -130,7 +150,7 @@ internal static class MacOsRouting
         request[2] = RtmVersion;
         request[3] = RtmGet;
         BinaryPrimitives.WriteInt32LittleEndian(request[8..], flags);
-        BinaryPrimitives.WriteInt32LittleEndian(request[12..], RtaDestination);
+        BinaryPrimitives.WriteInt32LittleEndian(request[12..], RtaDestination | RtaInterface);
         BinaryPrimitives.WriteInt32LittleEndian(request[20..], messageSequence);
 
         Span<byte> socketAddress = request.Slice(MessageHeaderLength, sockaddrLength);
@@ -152,6 +172,11 @@ internal static class MacOsRouting
             destination.TryWriteBytes(socketAddress.Slice(4, 4), out _);
         }
 
+        // An empty link-layer address asks the kernel to report the outgoing interface (RTA_IFP), like route(8) does.
+        Span<byte> interfaceAddress = request.Slice(MessageHeaderLength + sockaddrLength, SockaddrLinkLength);
+        interfaceAddress[0] = SockaddrLinkLength;
+        interfaceAddress[1] = AfLink;
+
         return messageLength;
     }
 
@@ -163,13 +188,14 @@ internal static class MacOsRouting
         int flags = BinaryPrimitives.ReadInt32LittleEndian(message[8..]);
         int addresses = BinaryPrimitives.ReadInt32LittleEndian(message[12..]);
         int errno = BinaryPrimitives.ReadInt32LittleEndian(message[24..]);
-        if (errno != 0 || interfaceIndex == 0)
+        if (errno != 0)
         {
             return false;
         }
 
         int messageLength = Math.Min(message.Length, BinaryPrimitives.ReadUInt16LittleEndian(message));
         int socketAddressOffset = MessageHeaderLength;
+        ReadOnlySpan<byte> gatewayAddress = default;
         for (int addressBit = 0; addressBit < 8 && socketAddressOffset < messageLength; addressBit++)
         {
             if ((addresses & (1 << addressBit)) == 0)
@@ -178,16 +204,31 @@ internal static class MacOsRouting
             }
 
             int socketAddressLength = message[socketAddressOffset];
+            ReadOnlySpan<byte> socketAddress = message[socketAddressOffset..Math.Min(messageLength, socketAddressOffset + Math.Max(socketAddressLength, 2))];
             if (1 << addressBit == RtaGateway && (flags & RtfGateway) != 0)
             {
-                gateway = ParseSocketAddress(message[socketAddressOffset..Math.Min(messageLength, socketAddressOffset + Math.Max(socketAddressLength, 2))], interfaceIndex);
+                gatewayAddress = socketAddress;
+            }
+            else if (1 << addressBit == RtaInterface && socketAddress.Length >= 4 && socketAddress[1] == AfLink)
+            {
+                int linkInterfaceIndex = BinaryPrimitives.ReadUInt16LittleEndian(socketAddress[2..]);
+                if (linkInterfaceIndex != 0)
+                {
+                    interfaceIndex = linkInterfaceIndex;
+                }
             }
 
             // Socket addresses in routing messages are padded to 4 bytes; an empty one still takes 4.
             socketAddressOffset += socketAddressLength == 0 ? 4 : (socketAddressLength + 3) & ~3;
         }
 
-        return true;
+        // The gateway is parsed last, so a link-local gateway gets the scope of the interface the route really uses.
+        if (!gatewayAddress.IsEmpty)
+        {
+            gateway = ParseSocketAddress(gatewayAddress, interfaceIndex);
+        }
+
+        return interfaceIndex != 0;
     }
 
     /// <summary>
@@ -207,6 +248,7 @@ internal static class MacOsRouting
     /// <summary>
     /// Reports whether routing messages change which interface or gateway a destination uses.
     /// Host routes (including those of addresses the pool assigns), neighbor entries and address messages are ignored.
+    /// On broadcast interfaces xnu adds the route of a /32 alias without RTF_HOST, so the netmask decides as well.
     /// </summary>
     internal static bool ContainsRelevantRouteChange(ReadOnlySpan<byte> messages)
     {
@@ -225,19 +267,92 @@ internal static class MacOsRouting
                 return true;
             }
 
-            if (messageType is RtmAdd or RtmDelete or RtmChange && messageLength >= 12)
+            if (messageType is RtmAdd or RtmDelete or RtmChange && IsRelevantRouteMessage(messages.Slice(messageOffset, messageLength)))
             {
-                int flags = BinaryPrimitives.ReadInt32LittleEndian(messages[(messageOffset + 8)..]);
-                if ((flags & (RtfHost | RtfLinkLayerInfo)) == 0)
-                {
-                    return true;
-                }
+                return true;
             }
 
             messageOffset += messageLength;
         }
 
         return false;
+    }
+
+    private static bool IsRelevantRouteMessage(ReadOnlySpan<byte> message)
+    {
+        if (message.Length < MessageHeaderLength)
+        {
+            // Not a full rt_msghdr: assume it matters, which only costs a cache refresh.
+            return true;
+        }
+
+        int flags = BinaryPrimitives.ReadInt32LittleEndian(message[8..]);
+        int addresses = BinaryPrimitives.ReadInt32LittleEndian(message[12..]);
+        if ((flags & (RtfHost | RtfLinkLayerInfo)) != 0 || (addresses & RtaNetmask) == 0)
+        {
+            // Host routes carry no netmask.
+            return false;
+        }
+
+        int destinationFamily = 0;
+        int socketAddressOffset = MessageHeaderLength;
+        for (int addressBit = 0; addressBit < 8 && socketAddressOffset < message.Length; addressBit++)
+        {
+            if ((addresses & (1 << addressBit)) == 0)
+            {
+                continue;
+            }
+
+            int socketAddressLength = message[socketAddressOffset];
+            if (1 << addressBit == RtaDestination && socketAddressLength >= 2)
+            {
+                destinationFamily = message[socketAddressOffset + 1];
+            }
+            else if (1 << addressBit == RtaNetmask)
+            {
+                int hostPrefixLength = destinationFamily switch
+                {
+                    AfInet => 32,
+                    AfInet6 => 128,
+                    _ => -1,
+                };
+
+                if (hostPrefixLength < 0)
+                {
+                    return true;
+                }
+
+                // Netmasks may be shortened: bytes past sa_len are zero, and an empty netmask is the default route.
+                int maskOffset = destinationFamily == AfInet ? 4 : 8;
+                ReadOnlySpan<byte> maskBytes = socketAddressLength > maskOffset
+                    ? message.Slice(socketAddressOffset + maskOffset, Math.Min(socketAddressLength, message.Length - socketAddressOffset) - maskOffset)
+                    : [];
+                return CountLeadingOneBits(maskBytes, hostPrefixLength / 8) < hostPrefixLength;
+            }
+
+            socketAddressOffset += socketAddressLength == 0 ? 4 : (socketAddressLength + 3) & ~3;
+        }
+
+        return true;
+    }
+
+    private static int CountLeadingOneBits(ReadOnlySpan<byte> maskBytes, int maximumByteCount)
+    {
+        int prefixLength = 0;
+        for (int byteIndex = 0; byteIndex < Math.Min(maskBytes.Length, maximumByteCount); byteIndex++)
+        {
+            byte maskByte = maskBytes[byteIndex];
+            if (maskByte == 0xFF)
+            {
+                prefixLength += 8;
+                continue;
+            }
+
+            prefixLength += System.Numerics.BitOperations.LeadingZeroCount((uint)(byte)~maskByte) - 24;
+            break;
+        }
+
+        return prefixLength;
     }
 
     private static IPAddress? ParseSocketAddress(ReadOnlySpan<byte> socketAddress, int interfaceIndex)

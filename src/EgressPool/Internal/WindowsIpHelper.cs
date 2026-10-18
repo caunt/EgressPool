@@ -13,7 +13,6 @@ internal static class WindowsIpHelper
     private const uint ErrorObjectAlreadyExists = 5010;
     private const uint ErrorNetworkUnreachable = 1231;
     private const uint ErrorHostUnreachable = 1232;
-    private const uint ErrorInvalidParameter = 87;
     private const int InterfaceAliasLength = 257;
     private const int IpDadStateDuplicate = 2;
     private const int IpDadStateDeprecated = 3;
@@ -25,6 +24,9 @@ internal static class WindowsIpHelper
     internal static bool CreateUnicastAddress(uint interfaceIndex, IPAddress address, int prefixLength)
     {
         MibUnicastIpAddressRow row = CreateAddressRow(interfaceIndex, address, prefixLength);
+
+        // Like WireGuard, ask for the address to start out preferred, which skips the 1-3 s duplicate address detection.
+        row.DadState = IpDadStatePreferred;
         uint result = CreateUnicastIpAddressEntry(ref row);
 
         if (result == ErrorObjectAlreadyExists)
@@ -39,7 +41,12 @@ internal static class WindowsIpHelper
     /// <summary>
     /// Waits until duplicate address detection lets a just added address be used; until then binding to it fails.
     /// </summary>
-    internal static bool WaitUntilAddressIsPreferred(uint interfaceIndex, IPAddress address, int prefixLength, TimeSpan timeout)
+    internal static async ValueTask<AddressReadiness> WaitUntilAddressIsPreferredAsync(
+        uint interfaceIndex,
+        IPAddress address,
+        int prefixLength,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
     {
         long startTimestamp = Stopwatch.GetTimestamp();
         while (true)
@@ -49,21 +56,21 @@ internal static class WindowsIpHelper
             {
                 if (row.DadState is IpDadStatePreferred or IpDadStateDeprecated)
                 {
-                    return true;
+                    return AddressReadiness.Ready;
                 }
 
                 if (row.DadState == IpDadStateDuplicate)
                 {
-                    return false;
+                    return AddressReadiness.Duplicate;
                 }
             }
 
             if (Stopwatch.GetElapsedTime(startTimestamp) >= timeout)
             {
-                return false;
+                return AddressReadiness.TimedOut;
             }
 
-            Thread.Sleep(5);
+            await Task.Delay(TimeSpan.FromMilliseconds(10), cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -87,7 +94,7 @@ internal static class WindowsIpHelper
         SockaddrInet destinationAddress = SockaddrInet.From(destination);
         uint result = GetBestRoute2(0, interfaceIndex, 0, ref destinationAddress, 0, out MibIpForwardRow2 bestRoute, out _);
 
-        if (result is ErrorNetworkUnreachable or ErrorHostUnreachable or ErrorNotFound or ErrorInvalidParameter)
+        if (result is ErrorNetworkUnreachable or ErrorHostUnreachable or ErrorNotFound)
         {
             return null;
         }

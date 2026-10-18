@@ -63,7 +63,10 @@ internal sealed class LinuxEgressNetworkPlatform : IEgressNetworkPlatform
         try
         {
             int interfaceIndex = UnixInterfaceNames.NameToIndex(interfaceName);
-            return NetlinkClient.GetRoute(NetworkInterfaceHelpers.Ipv6DefaultRouteProbe, interfaceIndex)?.Gateway;
+            RouteLookup? route = NetlinkClient.GetRoute(NetworkInterfaceHelpers.Ipv6DefaultRouteProbe, interfaceIndex);
+
+            // Only a route through the requested interface tells us that interface's gateway.
+            return route is { } scopedRoute && scopedRoute.InterfaceIndex == interfaceIndex ? scopedRoute.Gateway : null;
         }
         catch (Exception exception) when (exception is Win32Exception or InvalidOperationException)
         {
@@ -87,20 +90,28 @@ internal sealed class LinuxEgressNetworkPlatform : IEgressNetworkPlatform
             return PlatformNetworkStateLease.NotCreated;
         }
 
-        PlatformNetworkStateLease lease = new(true, new ActionDisposable(() => NetlinkClient.DeleteAddress(interfaceIndex, address, prefixLength)));
-        if (address.AddressFamily == AddressFamily.InterNetworkV6)
+        return new PlatformNetworkStateLease(true, new ActionDisposable(() => NetlinkClient.DeleteAddress(interfaceIndex, address, prefixLength)));
+    }
+
+    public async ValueTask<AddressReadiness> WaitUntilAddressReadyAsync(string interfaceName, IPAddress address, int prefixLength, CancellationToken cancellationToken)
+    {
+        // IPv4 addresses are routed as local as soon as they are added; IPv6 addresses shortly after.
+        if (address.AddressFamily != AddressFamily.InterNetworkV6)
         {
-            // IPv4 addresses are routed as local as soon as they are added; IPv6 addresses shortly after.
-            try
-            {
-                NetlinkClient.WaitUntilAddressIsLocal(address, AddressReadyTimeout);
-            }
-            catch (Exception exception) when (exception is Win32Exception or InvalidOperationException)
-            {
-            }
+            return AddressReadiness.Ready;
         }
 
-        return lease;
+        try
+        {
+            // Linux never leaves an added address unusable for long, so a slow kernel only delays the first handshake.
+            return await NetlinkClient.WaitUntilAddressIsLocalAsync(address, AddressReadyTimeout, cancellationToken).ConfigureAwait(false)
+                ? AddressReadiness.Ready
+                : AddressReadiness.Unconfirmed;
+        }
+        catch (Exception exception) when (exception is Win32Exception or InvalidOperationException)
+        {
+            return AddressReadiness.Unconfirmed;
+        }
     }
 
     public PlatformNetworkStateLease EnsureLocalRoute(IPNetwork prefix, string interfaceName)

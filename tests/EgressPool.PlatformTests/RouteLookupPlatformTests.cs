@@ -53,6 +53,84 @@ public sealed class RouteLookupPlatformTests
         }
     }
 
+    [PlatformTheory]
+    [InlineData(AddressFamily.InterNetwork)]
+    [InlineData(AddressFamily.InterNetworkV6)]
+    public void NativeRouteLookup_ScopedToDefaultRouteInterface_MatchesUnscopedRoute(AddressFamily addressFamily)
+    {
+        IPAddress probeAddress = NetworkInterfaceHelpers.GetDefaultRouteProbeAddress(addressFamily);
+        if (LookUpNativeRoute(probeAddress, interfaceIndex: 0) is not { } unscopedRoute)
+        {
+            // This machine has no default route for the address family.
+            return;
+        }
+
+        RouteLookup? scopedRoute = LookUpNativeRoute(probeAddress, unscopedRoute.InterfaceIndex);
+
+        Assert.True(scopedRoute.HasValue, $"The lookup scoped to {unscopedRoute.InterfaceName} found no route.");
+        Assert.Equal(unscopedRoute.InterfaceIndex, scopedRoute.Value.InterfaceIndex);
+        Assert.Equal(unscopedRoute.InterfaceName, scopedRoute.Value.InterfaceName);
+        Assert.Equal(unscopedRoute.Gateway?.GetAddressBytes(), scopedRoute.Value.Gateway?.GetAddressBytes());
+    }
+
+    [PlatformTheory]
+    [InlineData(AddressFamily.InterNetwork)]
+    [InlineData(AddressFamily.InterNetworkV6)]
+    public void NativeRouteLookup_ScopedToLoopback_ReportsNoGatewayThroughLoopback(AddressFamily addressFamily)
+    {
+        string loopbackInterfaceName = PlatformTestHelpers.GetLoopbackInterfaceName(addressFamily);
+        int loopbackInterfaceIndex = GetNativeInterfaceIndex(loopbackInterfaceName);
+
+        RouteLookup? route = LookUpNativeRoute(NetworkInterfaceHelpers.GetDefaultRouteProbeAddress(addressFamily), loopbackInterfaceIndex);
+
+        // The OS may report no route, or fall back to another interface's route; neither is a gateway through loopback.
+        Assert.True(
+            route is null || route.Value.InterfaceIndex != loopbackInterfaceIndex || route.Value.Gateway is null,
+            $"Loopback unexpectedly reported gateway {route?.Gateway} through {route?.InterfaceName}.");
+        if (addressFamily == AddressFamily.InterNetworkV6)
+        {
+            Assert.Null(EgressPlatform.Create().GetIpv6Gateway(loopbackInterfaceName));
+        }
+    }
+
+    [PlatformTheory]
+    [InlineData(AddressFamily.InterNetwork)]
+    [InlineData(AddressFamily.InterNetworkV6)]
+    public async Task AddAddress_RealInterface_BecomesUsable(AddressFamily addressFamily)
+    {
+        // Loopback skips duplicate address detection everywhere, so this uses the interface of the IPv4 default route,
+        // a real interface on which macOS and Windows run DAD for both families.
+        string interfaceName;
+        try
+        {
+            interfaceName = NetworkInterfaceHelpers.GetDefaultRouteInterface(AddressFamily.InterNetwork);
+        }
+        catch (SocketException)
+        {
+            return;
+        }
+
+        IEgressNetworkPlatform platform = EgressPlatform.Create();
+        IPAddress address = PlatformTestHelpers.CreateUniqueUnicastAddress(addressFamily);
+        int prefixLength = PlatformTestHelpers.GetHostPrefixLength(addressFamily);
+        using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(15));
+
+        PlatformNetworkStateLease lease = platform.AddAddress(interfaceName, address, prefixLength);
+        try
+        {
+            Assert.True(lease.Created, $"{address} was already present on {interfaceName}.");
+            AddressReadiness readiness = await platform.WaitUntilAddressReadyAsync(interfaceName, address, prefixLength, timeout.Token);
+
+            Assert.Equal(AddressReadiness.Ready, readiness);
+            using Socket socket = new(addressFamily, SocketType.Stream, ProtocolType.Tcp);
+            socket.Bind(new IPEndPoint(address, 0));
+        }
+        finally
+        {
+            lease.Disposable.Dispose();
+        }
+    }
+
     [PlatformFact]
     public void GetIpv6Gateway_DefaultRouteInterface_MatchesInterfaceEnumeration()
     {
@@ -97,9 +175,12 @@ public sealed class RouteLookupPlatformTests
         for (int attempt = 0; attempt < 20; attempt++)
         {
             IPAddress sourceAddress = PlatformTestHelpers.CreateUniqueLoopbackAddress(addressFamily);
-            PlatformNetworkStateLease lease = platform.AddAddress(interfaceName, sourceAddress, PlatformTestHelpers.GetHostPrefixLength(addressFamily));
+            int prefixLength = PlatformTestHelpers.GetHostPrefixLength(addressFamily);
+            PlatformNetworkStateLease lease = platform.AddAddress(interfaceName, sourceAddress, prefixLength);
             try
             {
+                // The pool always waits for readiness after adding an address; without it the first handshake can be lost.
+                Assert.Equal(AddressReadiness.Ready, await platform.WaitUntilAddressReadyAsync(interfaceName, sourceAddress, prefixLength, CancellationToken.None));
                 using Socket socket = new(addressFamily, SocketType.Stream, ProtocolType.Tcp);
                 socket.Bind(new IPEndPoint(sourceAddress, 0));
                 Stopwatch connectTime = Stopwatch.StartNew();
@@ -135,6 +216,11 @@ public sealed class RouteLookupPlatformTests
 
         throw new PlatformNotSupportedException();
     }
+
+    private static int GetNativeInterfaceIndex(string interfaceName) =>
+        OperatingSystem.IsWindows()
+            ? checked((int)WindowsIpHelper.GetInterfaceIndex(interfaceName))
+            : UnixInterfaceNames.NameToIndex(interfaceName);
 
     private static byte[][] GetEnumeratedGateways(string interfaceName, AddressFamily addressFamily) =>
         NetworkInterfaceHelpers.ResolveInterface(interfaceName)

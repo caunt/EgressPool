@@ -83,21 +83,23 @@ internal sealed class NetworkRouteCache(IEgressNetworkPlatform platform, TimePro
         int fetchGeneration = Volatile.Read(ref generation);
         if (entries.TryGetValue(key, out Entry<TValue> entry) &&
             entry.Generation == fetchGeneration &&
-            timeProvider.GetUtcNow() < entry.ExpiresAt)
+            timeProvider.GetElapsedTime(entry.FetchedTimestamp) < lifetime)
         {
             return entry.Value;
         }
 
+        // Monotonic timestamps, so a wall clock step neither keeps entries longer nor expires them early.
+        long fetchedTimestamp = timeProvider.GetTimestamp();
         TValue value = fetch(platform, key);
         if (Volatile.Read(ref generation) == fetchGeneration)
         {
-            entries[key] = new Entry<TValue>(value, timeProvider.GetUtcNow() + lifetime, fetchGeneration);
+            entries[key] = new Entry<TValue>(value, fetchedTimestamp, fetchGeneration);
         }
 
         return value;
     }
 
-    private readonly record struct Entry<TValue>(TValue Value, DateTimeOffset ExpiresAt, int Generation);
+    private readonly record struct Entry<TValue>(TValue Value, long FetchedTimestamp, int Generation);
 
     private readonly record struct AssignedAddressesKey(string InterfaceName, AddressFamily AddressFamily);
 }

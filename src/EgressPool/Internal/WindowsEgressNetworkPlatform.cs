@@ -7,7 +7,7 @@ namespace Egress.Internal;
 
 internal sealed class WindowsEgressNetworkPlatform : IEgressNetworkPlatform
 {
-    private static readonly TimeSpan AddressReadyTimeout = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan AddressReadyTimeout = TimeSpan.FromSeconds(5);
 
     public bool SupportsTrueNonLocalBind => false;
 
@@ -43,7 +43,10 @@ internal sealed class WindowsEgressNetworkPlatform : IEgressNetworkPlatform
             uint interfaceIndex = WindowsIpHelper.GetInterfaceIndex(interfaceName);
             if (interfaceIndex != 0)
             {
-                return WindowsIpHelper.GetBestRoute(NetworkInterfaceHelpers.Ipv6DefaultRouteProbe, interfaceIndex)?.Gateway;
+                RouteLookup? route = WindowsIpHelper.GetBestRoute(NetworkInterfaceHelpers.Ipv6DefaultRouteProbe, interfaceIndex);
+
+                // Only a route through the requested interface tells us that interface's gateway.
+                return route is { } scopedRoute && scopedRoute.InterfaceIndex == interfaceIndex ? scopedRoute.Gateway : null;
             }
         }
         catch (Exception exception) when (exception is InvalidOperationException or Win32Exception)
@@ -69,10 +72,16 @@ internal sealed class WindowsEgressNetworkPlatform : IEgressNetworkPlatform
             return PlatformNetworkStateLease.NotCreated;
         }
 
-        // Windows runs duplicate address detection for IPv4 and IPv6 addresses before they can be bound.
-        WindowsIpHelper.WaitUntilAddressIsPreferred(interfaceIndex, address, prefixLength, AddressReadyTimeout);
 
         return new PlatformNetworkStateLease(true, new ActionDisposable(() => WindowsIpHelper.DeleteUnicastAddress(interfaceIndex, address, prefixLength)));
+    }
+
+    public ValueTask<AddressReadiness> WaitUntilAddressReadyAsync(string interfaceName, IPAddress address, int prefixLength, CancellationToken cancellationToken)
+    {
+        // Windows runs duplicate address detection for IPv4 and IPv6 addresses before they can be bound,
+        // unless it honored the request to create the address as preferred.
+        uint interfaceIndex = GetInterfaceIndex(interfaceName, address.AddressFamily);
+        return WindowsIpHelper.WaitUntilAddressIsPreferredAsync(interfaceIndex, address, prefixLength, AddressReadyTimeout, cancellationToken);
     }
 
     public PlatformNetworkStateLease EnsureLocalRoute(IPNetwork prefix, string interfaceName) =>

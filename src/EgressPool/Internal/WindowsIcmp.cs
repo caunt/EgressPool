@@ -14,6 +14,7 @@ internal static class WindowsIcmp
     private const int ErrorIoPending = 997;
     private const int IpStatusBase = 11000;
     private const uint IpSuccess = 0;
+    private const uint IpRequestTimedOut = 11010;
     private const ushort AfInet6 = 23;
     private const int SockaddrIn6Size = 28;
     private const int ReplyBufferSize = 1024;
@@ -60,6 +61,30 @@ internal static class WindowsIcmp
         public void Dispose()
         {
         }
+    }
+
+    /// <summary>
+    /// Converts a timeout to the whole milliseconds Icmp6SendEcho2 takes, rounding up so a short remainder is not zero.
+    /// </summary>
+    internal static uint ToTimeoutMilliseconds(TimeSpan timeout) =>
+        (uint)Math.Clamp(Math.Ceiling(timeout.TotalMilliseconds), 1, int.MaxValue);
+
+    /// <summary>
+    /// Classifies a completed request: a reply, a timeout without one, or a failure such as an ICMPv6 error.
+    /// </summary>
+    internal static AddressWarmUpStatus ClassifyReply(uint replyCount, uint replyStatus, int lastError)
+    {
+        if (replyCount > 0)
+        {
+            return replyStatus switch
+            {
+                IpSuccess => AddressWarmUpStatus.Replied,
+                IpRequestTimedOut => AddressWarmUpStatus.NoReply,
+                _ => AddressWarmUpStatus.Failed,
+            };
+        }
+
+        return lastError == IpRequestTimedOut ? AddressWarmUpStatus.NoReply : AddressWarmUpStatus.Failed;
     }
 
     private static void WriteSockaddrIn6(Span<byte> destination, IPAddress address)
@@ -111,50 +136,59 @@ internal static class WindowsIcmp
 
         private void Send(IPAddress sourceAddress, TimeSpan timeout)
         {
-            requestBuffer = NativeMemory.Alloc(Icmpv6Echo.PayloadLength);
-            RandomNumberGenerator.Fill(new Span<byte>(requestBuffer, Icmpv6Echo.PayloadLength));
-            replyBuffer = NativeMemory.AllocZeroed(ReplyBufferSize);
-            registeredWait = ThreadPool.RegisterWaitForSingleObject(
-                completedEvent,
-                static (state, _) => ((EchoRequest)state!).OnCompleted(),
-                this,
-                Timeout.Infinite,
-                executeOnlyOnce: true);
-
             byte* sourceSocketAddress = stackalloc byte[SockaddrIn6Size];
             byte* destinationSocketAddress = stackalloc byte[SockaddrIn6Size];
-            WriteSockaddrIn6(new Span<byte>(sourceSocketAddress, SockaddrIn6Size), sourceAddress);
-            WriteSockaddrIn6(new Span<byte>(destinationSocketAddress, SockaddrIn6Size), destinationAddress);
-            IpOptionInformation options = new() { Ttl = DefaultHopLimit };
 
-            uint result = Icmp6SendEcho2(
-                icmpHandle,
-                completedEvent.SafeWaitHandle,
-                0,
-                0,
-                sourceSocketAddress,
-                destinationSocketAddress,
-                requestBuffer,
-                Icmpv6Echo.PayloadLength,
-                ref options,
-                replyBuffer,
-                ReplyBufferSize,
-                checked((uint)timeout.TotalMilliseconds));
-
-            if (result != 0)
+            try
             {
-                return;
-            }
+                // Everything that can throw comes before the request owns native memory and a registered wait,
+                // and Complete releases whatever was already set up.
+                WriteSockaddrIn6(new Span<byte>(sourceSocketAddress, SockaddrIn6Size), sourceAddress);
+                WriteSockaddrIn6(new Span<byte>(destinationSocketAddress, SockaddrIn6Size), destinationAddress);
+                uint timeoutMilliseconds = ToTimeoutMilliseconds(timeout);
 
-            int error = Marshal.GetLastPInvokeError();
-            if (error == ErrorIoPending)
+                requestBuffer = NativeMemory.Alloc(Icmpv6Echo.PayloadLength);
+                RandomNumberGenerator.Fill(new Span<byte>(requestBuffer, Icmpv6Echo.PayloadLength));
+                replyBuffer = NativeMemory.AllocZeroed(ReplyBufferSize);
+                registeredWait = ThreadPool.RegisterWaitForSingleObject(
+                    completedEvent,
+                    static (state, _) => ((EchoRequest)state!).OnCompleted(),
+                    this,
+                    Timeout.Infinite,
+                    executeOnlyOnce: true);
+
+                IpOptionInformation options = new() { Ttl = DefaultHopLimit };
+                uint result = Icmp6SendEcho2(
+                    icmpHandle,
+                    completedEvent.SafeWaitHandle,
+                    0,
+                    0,
+                    sourceSocketAddress,
+                    destinationSocketAddress,
+                    requestBuffer,
+                    Icmpv6Echo.PayloadLength,
+                    ref options,
+                    replyBuffer,
+                    ReplyBufferSize,
+                    timeoutMilliseconds);
+
+                if (result != 0)
+                {
+                    return;
+                }
+
+                int error = Marshal.GetLastPInvokeError();
+                if (error == ErrorIoPending)
+                {
+                    return;
+                }
+
+                Complete(CreateResult(ClassifyReply(replyCount: 0, replyStatus: IpSuccess, lastError: error), error));
+            }
+            catch (Exception exception)
             {
-                return;
+                Complete(new AddressWarmUpResult(AddressWarmUpStatus.Failed, destinationAddress, Exception: exception));
             }
-
-            Complete(error >= IpStatusBase
-                ? new AddressWarmUpResult(AddressWarmUpStatus.NoReply, destinationAddress)
-                : new AddressWarmUpResult(AddressWarmUpStatus.Failed, destinationAddress, Exception: new Win32Exception(error)));
         }
 
         private void OnCompleted()
@@ -163,10 +197,9 @@ internal static class WindowsIcmp
             try
             {
                 uint replyCount = Icmp6ParseReplies(replyBuffer, ReplyBufferSize);
+                int lastError = Marshal.GetLastPInvokeError();
                 uint status = BinaryPrimitives.ReadUInt32LittleEndian(new ReadOnlySpan<byte>((byte*)replyBuffer + ReplyStatusOffset, sizeof(uint)));
-                result = replyCount > 0 && status == IpSuccess
-                    ? new AddressWarmUpResult(AddressWarmUpStatus.Replied, destinationAddress, Stopwatch.GetElapsedTime(startTimestamp))
-                    : new AddressWarmUpResult(AddressWarmUpStatus.NoReply, destinationAddress);
+                result = CreateResult(ClassifyReply(replyCount, status, lastError), replyCount > 0 ? checked((int)status) : lastError);
             }
             catch (Exception exception)
             {
@@ -175,6 +208,19 @@ internal static class WindowsIcmp
 
             Complete(result);
         }
+
+        private AddressWarmUpResult CreateResult(AddressWarmUpStatus status, int code) =>
+            status switch
+            {
+                AddressWarmUpStatus.Replied => new AddressWarmUpResult(status, destinationAddress, Stopwatch.GetElapsedTime(startTimestamp)),
+                AddressWarmUpStatus.NoReply => new AddressWarmUpResult(status, destinationAddress),
+                _ => new AddressWarmUpResult(
+                    AddressWarmUpStatus.Failed,
+                    destinationAddress,
+                    Exception: code < IpStatusBase
+                        ? new Win32Exception(code)
+                        : new InvalidOperationException($"The ICMPv6 echo request failed with IP status {code}.")),
+            };
 
         private void Complete(AddressWarmUpResult result)
         {
