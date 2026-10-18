@@ -106,6 +106,17 @@ public sealed class RouteMessageParsingTests
         Assert.True(NetlinkClient.ContainsRelevantRouteChange([.. leaseRoute, .. defaultRoute]));
     }
 
+    [Theory]
+    [InlineData(4u)]
+    [InlineData(uint.MaxValue)]
+    public void ContainsRelevantRouteChange_LinuxMessageLongerThanBuffer_ReportsChange(uint extraLength)
+    {
+        byte[] message = CreateLinuxRouteMessage(LinuxRtmNewRoute, family: 10, destinationLength: 128, LinuxTableLocal, outputInterface: 1, gateway: null);
+        BinaryPrimitives.WriteUInt32LittleEndian(message, extraLength == uint.MaxValue ? uint.MaxValue : (uint)message.Length + extraLength);
+
+        Assert.True(NetlinkClient.ContainsRelevantRouteChange(message));
+    }
+
     [Fact]
     public void TryParseRouteReply_MacOsDefaultRouteWithLinkLocalGateway_ClearsEmbeddedScope()
     {
@@ -226,6 +237,70 @@ public sealed class RouteMessageParsingTests
 
         Assert.False(MacOsRouting.ContainsRelevantRouteChange([.. aliasRoute, .. hostRoute]));
         Assert.True(MacOsRouting.ContainsRelevantRouteChange([.. aliasRoute, .. hostRoute, .. defaultRoute]));
+    }
+
+    [Theory]
+    [InlineData("::", 0, true)]
+    [InlineData("2001:db8::", 64, true)]
+    [InlineData("fd7a::1", 128, false)]
+    [InlineData("0.0.0.0", 0, true)]
+    [InlineData("192.0.2.0", 24, true)]
+    [InlineData("198.18.1.2", 32, false)]
+    public void ContainsRelevantRouteChange_MacOsRouteWithLinkLayerGateway_ReadsNetmaskAfterGateway(string destination, int prefixLength, bool expected)
+    {
+        // The kernel orders socket addresses by RTA bit, so the gateway comes between the destination and the netmask.
+        // An interface route's gateway is a link-layer address, here 17 bytes long (en0 and a MAC address) and padded to 20.
+        byte[] message = CreateMacOsRouteMessage(
+            MacOsRouting.RtmAdd,
+            MacOsRouting.RtfUp,
+            IPAddress.Parse(destination),
+            prefixLength,
+            gateway: CreateMacOsLinkSocketAddress("en0", interfaceIndex: 4));
+
+        Assert.Equal(expected, MacOsRouting.ContainsRelevantRouteChange(message));
+    }
+
+    [Theory]
+    [InlineData("::", "fe80:4::1", 0, true)]
+    [InlineData("fd7a::1", "fe80:4::1", 128, false)]
+    [InlineData("0.0.0.0", "192.0.2.1", 0, true)]
+    [InlineData("198.18.1.2", "192.0.2.1", 32, false)]
+    public void ContainsRelevantRouteChange_MacOsRouteWithIpGateway_ReadsNetmaskAfterGateway(string destination, string gateway, int prefixLength, bool expected)
+    {
+        byte[] message = CreateMacOsRouteMessage(
+            MacOsRouting.RtmAdd,
+            MacOsRouting.RtfUp | MacOsRouting.RtfGateway,
+            IPAddress.Parse(destination),
+            prefixLength,
+            gateway: CreateMacOsSocketAddress(IPAddress.Parse(gateway)));
+
+        Assert.Equal(expected, MacOsRouting.ContainsRelevantRouteChange(message));
+    }
+
+    [Fact]
+    public void ContainsRelevantRouteChange_MacOsDestinationStartsOnLastByte_ReportsChangeWithoutThrowing()
+    {
+        byte[] message = CreateMacOsRouteMessage(MacOsRouting.RtmAdd, MacOsRouting.RtfUp, MacOsRouting.RtaDestination | MacOsRouting.RtaNetmask, [16]);
+
+        Assert.True(MacOsRouting.ContainsRelevantRouteChange(message));
+    }
+
+    [Fact]
+    public void ContainsRelevantRouteChange_MacOsNetmaskRunsPastEnd_ReportsChangeWithoutThrowing()
+    {
+        // The netmask claims 8 bytes, but only 2 are left in the message.
+        byte[] destination = CreateMacOsSocketAddress(IPAddress.Parse("192.0.2.0"));
+        byte[] message = CreateMacOsRouteMessage(MacOsRouting.RtmAdd, MacOsRouting.RtfUp, MacOsRouting.RtaDestination | MacOsRouting.RtaNetmask, [.. destination, 8, 0]);
+
+        Assert.True(MacOsRouting.ContainsRelevantRouteChange(message));
+    }
+
+    [Fact]
+    public void ContainsRelevantRouteChange_MacOsMessageLongerThanBuffer_ReportsChange()
+    {
+        byte[] hostRoute = CreateMacOsRouteMessage(MacOsRouting.RtmAdd, MacOsRouting.RtfUp, IPAddress.Parse("198.18.1.2"), 32);
+
+        Assert.True(MacOsRouting.ContainsRelevantRouteChange(hostRoute.AsSpan(0, hostRoute.Length - 4)));
     }
 
     [Fact]
@@ -382,7 +457,7 @@ public sealed class RouteMessageParsingTests
         return bytes;
     }
 
-    private static byte[] CreateMacOsRouteMessage(byte messageType, int flags, IPAddress destination, int? prefixLength)
+    private static byte[] CreateMacOsRouteMessage(byte messageType, int flags, IPAddress destination, int? prefixLength, byte[]? gateway = null)
     {
         byte[]? netmask = null;
         if (prefixLength is { } length)
@@ -400,32 +475,63 @@ public sealed class RouteMessageParsingTests
             }
         }
 
-        return CreateMacOsRouteMessage(messageType, flags, destination, netmask);
+        return CreateMacOsRouteMessage(messageType, flags, destination, netmask, gateway);
     }
 
-    private static byte[] CreateMacOsRouteMessage(byte messageType, int flags, IPAddress destination, byte[]? netmask)
+    private static byte[] CreateMacOsRouteMessage(byte messageType, int flags, IPAddress destination, byte[]? netmask, byte[]? gateway = null)
     {
         int addresses = MacOsRouting.RtaDestination;
-        List<byte> message = [.. new byte[MacOsRouting.MessageHeaderLength]];
-        message.AddRange(CreateMacOsSocketAddress(destination));
+        List<byte> socketAddresses = [.. CreateMacOsSocketAddress(destination)];
+
+        if (gateway is not null)
+        {
+            addresses |= MacOsRouting.RtaGateway;
+            AddPadded(socketAddresses, gateway);
+        }
 
         if (netmask is not null)
         {
             addresses |= MacOsRouting.RtaNetmask;
-            message.AddRange(netmask.Length == 0 ? new byte[4] : netmask);
-            while (message.Count % 4 != 0)
-            {
-                message.Add(0);
-            }
+            AddPadded(socketAddresses, netmask.Length == 0 ? new byte[4] : netmask);
         }
 
-        byte[] bytes = [.. message];
+        return CreateMacOsRouteMessage(messageType, flags, addresses, [.. socketAddresses]);
+
+        static void AddPadded(List<byte> socketAddresses, byte[] socketAddress)
+        {
+            socketAddresses.AddRange(socketAddress);
+            while (socketAddresses.Count % 4 != 0)
+            {
+                socketAddresses.Add(0);
+            }
+        }
+    }
+
+    private static byte[] CreateMacOsRouteMessage(byte messageType, int flags, int addresses, byte[] socketAddresses)
+    {
+        byte[] bytes = [.. new byte[MacOsRouting.MessageHeaderLength], .. socketAddresses];
         BinaryPrimitives.WriteUInt16LittleEndian(bytes, (ushort)bytes.Length);
         bytes[2] = 5;
         bytes[3] = messageType;
         BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(8), flags);
         BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(12), addresses);
         return bytes;
+    }
+
+    private static byte[] CreateMacOsLinkSocketAddress(string interfaceName, ushort interfaceIndex)
+    {
+        // struct sockaddr_dl: length, family, index, type, name length, address length, selector length, then the name and address.
+        byte[] linkAddress = [0x00, 0x1C, 0x42, 0x00, 0x00, 0x01];
+        byte[] socketAddress = new byte[8 + interfaceName.Length + linkAddress.Length];
+        socketAddress[0] = (byte)socketAddress.Length;
+        socketAddress[1] = 18;
+        BinaryPrimitives.WriteUInt16LittleEndian(socketAddress.AsSpan(2), interfaceIndex);
+        socketAddress[4] = 6;
+        socketAddress[5] = (byte)interfaceName.Length;
+        socketAddress[6] = (byte)linkAddress.Length;
+        System.Text.Encoding.ASCII.GetBytes(interfaceName).CopyTo(socketAddress, 8);
+        linkAddress.CopyTo(socketAddress, 8 + interfaceName.Length);
+        return socketAddress;
     }
 
     private static byte[] CreateMacOsSocketAddress(IPAddress address)

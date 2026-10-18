@@ -75,7 +75,7 @@ internal sealed class UnixRouteChangeMonitor : IDisposable
 
                 if (receivedByteCount > 0)
                 {
-                    if (isRelevantChange(receiveBuffer.AsSpan(0, checked((int)receivedByteCount))))
+                    if (IsRelevantChange(receiveBuffer.AsSpan(0, checked((int)receivedByteCount))))
                     {
                         NotifyChange();
                     }
@@ -101,9 +101,27 @@ internal sealed class UnixRouteChangeMonitor : IDisposable
                 return;
             }
         }
+        catch
+        {
+            // An exception on this background thread would end the process, so it only ends monitoring.
+            NotifyChange();
+        }
         finally
         {
             Close(socketFileDescriptor);
+        }
+    }
+
+    private bool IsRelevantChange(ReadOnlySpan<byte> messages)
+    {
+        try
+        {
+            return isRelevantChange(messages);
+        }
+        catch
+        {
+            // A message the filter cannot parse is assumed to matter, and monitoring goes on.
+            return true;
         }
     }
 

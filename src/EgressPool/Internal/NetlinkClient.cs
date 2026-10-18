@@ -324,12 +324,15 @@ internal static class NetlinkClient
         int messageOffset = 0;
         while (messageOffset + NetlinkHeaderLength <= messages.Length)
         {
-            int messageLength = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(messages[messageOffset..]));
+            uint declaredLength = BinaryPrimitives.ReadUInt32LittleEndian(messages[messageOffset..]);
             ushort messageType = BinaryPrimitives.ReadUInt16LittleEndian(messages[(messageOffset + 4)..]);
-            if (messageLength < NetlinkHeaderLength || messageOffset + messageLength > messages.Length)
+            if (declaredLength < NetlinkHeaderLength || declaredLength > (uint)(messages.Length - messageOffset))
             {
-                return false;
+                // A truncated or malformed message: assume it matters, which only costs a cache refresh.
+                return true;
             }
+
+            int messageLength = (int)declaredLength;
 
             if (messageType is RtmNewLink or RtmDeleteLink)
             {

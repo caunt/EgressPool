@@ -5,7 +5,7 @@ namespace Egress.PlatformTests;
 
 public sealed class Icmpv6EchoPlatformTests
 {
-    [PlatformFact]
+    [PlatformFact(RequiresElevation = true)]
     public async Task SendAsync_Ipv6Loopback_ReceivesEchoReply()
     {
         using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(15));

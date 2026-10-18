@@ -14,7 +14,7 @@ public sealed class RealPlatformBehaviorTests
 
     public static TheoryData<PlatformScenario> HttpScenarios => CreateTheoryData(PlatformApi.Http);
 
-    [PlatformTheory]
+    [PlatformTheory(RequiresElevation = true)]
     [MemberData(nameof(RentAddressScenarios))]
     public async Task RentAddressAsync_RealPlatform_ReturnsExpectedAddressAndCleansUp(PlatformScenario scenario)
     {
@@ -40,7 +40,7 @@ public sealed class RealPlatformBehaviorTests
         }
     }
 
-    [PlatformTheory]
+    [PlatformTheory(RequiresElevation = true)]
     [MemberData(nameof(TcpScenarios))]
     public async Task ConnectTcpAsync_RealPlatform_UsesExpectedSourceAddress(PlatformScenario scenario)
     {
@@ -61,7 +61,7 @@ public sealed class RealPlatformBehaviorTests
         context.AssertCustomSelectionIfNeeded(context.DestinationAddress);
     }
 
-    [PlatformTheory]
+    [PlatformTheory(RequiresElevation = true)]
     [MemberData(nameof(UdpScenarios))]
     public async Task CreateUdpClient_RealPlatform_UsesExpectedSourceAddress(PlatformScenario scenario)
     {
@@ -83,7 +83,7 @@ public sealed class RealPlatformBehaviorTests
         context.AssertCustomSelectionIfNeeded(destinationAddress: null);
     }
 
-    [PlatformTheory]
+    [PlatformTheory(RequiresElevation = true)]
     [MemberData(nameof(HttpScenarios))]
     public async Task CreateHttpClient_RealPlatform_UsesExpectedSourceAddress(PlatformScenario scenario)
     {
@@ -103,7 +103,7 @@ public sealed class RealPlatformBehaviorTests
         context.AssertCustomSelectionIfNeeded(context.DestinationAddress);
     }
 
-    [PlatformTheory]
+    [PlatformTheory(RequiresElevation = true)]
     [InlineData(AddressFamily.InterNetwork)]
     [InlineData(AddressFamily.InterNetworkV6)]
     public async Task HttpConnection_KeepAlive_KeepsAssignedAddressUntilHandlerDisposed(AddressFamily addressFamily)
@@ -140,7 +140,7 @@ public sealed class RealPlatformBehaviorTests
         await PlatformTestHelpers.WaitUntilAddressUnassignedAsync(context.LoopbackInterfaceName, context.SourceAddress);
     }
 
-    [PlatformTheory]
+    [PlatformTheory(RequiresElevation = true)]
     [InlineData(AddressFamily.InterNetwork)]
     [InlineData(AddressFamily.InterNetworkV6)]
     public async Task HttpConnection_ServerClosesConnection_ReleasesAddressBetweenRequests(AddressFamily addressFamily)
@@ -168,7 +168,7 @@ public sealed class RealPlatformBehaviorTests
         Assert.Equal(2, server.RequestCount);
     }
 
-    [PlatformTheory]
+    [PlatformTheory(RequiresElevation = true)]
     [InlineData(AddressFamily.InterNetwork)]
     [InlineData(AddressFamily.InterNetworkV6)]
     public async Task CreateUdpClient_MixedPrefixes_UsesDefaultAddressFamily(AddressFamily defaultAddressFamily)
@@ -224,7 +224,7 @@ public sealed class RealPlatformBehaviorTests
         Assert.Equal(assignedAddress.Address, lease.Address);
     }
 
-    [PlatformTheory]
+    [PlatformTheory(RequiresElevation = true)]
     [InlineData(AddressFamily.InterNetwork)]
     [InlineData(AddressFamily.InterNetworkV6)]
     public async Task ConnectTcpAsync_WhenConnectionFails_RemovesAssignedAddress(AddressFamily addressFamily)

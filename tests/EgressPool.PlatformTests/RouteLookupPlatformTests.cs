@@ -93,25 +93,22 @@ public sealed class RouteLookupPlatformTests
         }
     }
 
-    [PlatformTheory]
+    [PlatformTheory(RequiresElevation = true)]
     [InlineData(AddressFamily.InterNetwork)]
     [InlineData(AddressFamily.InterNetworkV6)]
-    public async Task AddAddress_RealInterface_BecomesUsable(AddressFamily addressFamily)
+    public async Task AddAddress_RealInterface_BecomesUsableRightAway(AddressFamily addressFamily)
     {
-        // Loopback skips duplicate address detection everywhere, so this uses the interface of the IPv4 default route,
-        // a real interface on which macOS and Windows run DAD for both families.
-        string interfaceName;
-        try
-        {
-            interfaceName = NetworkInterfaceHelpers.GetDefaultRouteInterface(AddressFamily.InterNetwork);
-        }
-        catch (SocketException)
+        // Loopback skips duplicate address detection everywhere, so this uses the interface of the IPv4 default route, a
+        // real interface on which macOS runs DAD for IPv6 and Windows for both families. The address is added as optimistic
+        // (macOS) or preferred (Windows), so it is usable at once instead of after a DAD round of a second or more.
+        // macOS has no DAD for IPv4, so there that case only checks that the address can be bound.
+        if (!TryGetRealInterface(out string interfaceName))
         {
             return;
         }
 
         IEgressNetworkPlatform platform = EgressPlatform.Create();
-        IPAddress address = PlatformTestHelpers.CreateUniqueUnicastAddress(addressFamily);
+        IPAddress address = PlatformTestHelpers.CreateUniqueRealInterfaceAddress(addressFamily);
         int prefixLength = PlatformTestHelpers.GetHostPrefixLength(addressFamily);
         using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(15));
 
@@ -119,9 +116,14 @@ public sealed class RouteLookupPlatformTests
         try
         {
             Assert.True(lease.Created, $"{address} was already present on {interfaceName}.");
+            Stopwatch waitTime = Stopwatch.StartNew();
             AddressReadiness readiness = await platform.WaitUntilAddressReadyAsync(interfaceName, address, prefixLength, timeout.Token);
+            waitTime.Stop();
 
             Assert.Equal(AddressReadiness.Ready, readiness);
+            Assert.True(
+                waitTime.Elapsed < TimeSpan.FromMilliseconds(500),
+                $"{address} on {interfaceName} became ready after {waitTime.ElapsedMilliseconds} ms, as if duplicate address detection ran in full.");
             using Socket socket = new(addressFamily, SocketType.Stream, ProtocolType.Tcp);
             socket.Bind(new IPEndPoint(address, 0));
         }
@@ -129,6 +131,60 @@ public sealed class RouteLookupPlatformTests
         {
             lease.Disposable.Dispose();
         }
+    }
+
+    [PlatformFact(RequiresElevation = true)]
+    public async Task MonitorRouteChanges_AddressesAddedAndRemovedOnRealInterface_ReportsNoChange()
+    {
+        // The pool adds and removes an address for every lease. If the monitor reported those as route changes, every
+        // lease would clear the route cache and the route lookups would be back on the connection path.
+        if (!TryGetRealInterface(out string interfaceName))
+        {
+            return;
+        }
+
+        const int AddressCount = 10;
+        IEgressNetworkPlatform platform = EgressPlatform.Create();
+        int changeCount = 0;
+        using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(30));
+        List<PlatformNetworkStateLease> leases = [];
+
+        using (IDisposable? monitor = platform.MonitorRouteChanges(() => Interlocked.Increment(ref changeCount)))
+        {
+            Assert.NotNull(monitor);
+            try
+            {
+                for (int index = 0; index < AddressCount; index++)
+                {
+                    AddressFamily addressFamily = index % 2 == 0 ? AddressFamily.InterNetwork : AddressFamily.InterNetworkV6;
+                    IPAddress address = PlatformTestHelpers.CreateUniqueRealInterfaceAddress(addressFamily);
+                    int prefixLength = PlatformTestHelpers.GetHostPrefixLength(addressFamily);
+                    PlatformNetworkStateLease lease = platform.AddAddress(interfaceName, address, prefixLength);
+                    leases.Add(lease);
+                    Assert.True(lease.Created, $"{address} was already present on {interfaceName}.");
+                    Assert.Equal(AddressReadiness.Ready, await platform.WaitUntilAddressReadyAsync(interfaceName, address, prefixLength, timeout.Token));
+                }
+
+                // Hold the addresses past a full DAD round, as connections do, so its completion is observed as well.
+                await Task.Delay(TimeSpan.FromSeconds(1.5), timeout.Token);
+            }
+            finally
+            {
+                foreach (PlatformNetworkStateLease lease in leases)
+                {
+                    lease.Disposable.Dispose();
+                }
+            }
+
+            // Notifications are delivered asynchronously.
+            await Task.Delay(TimeSpan.FromSeconds(1), timeout.Token);
+        }
+
+        // Unrelated network events can still arrive during the test, but nowhere near one per address.
+        int reportedChanges = Volatile.Read(ref changeCount);
+        Assert.True(
+            reportedChanges <= 2,
+            $"The route change monitor reported {reportedChanges} changes while {AddressCount} addresses were added to and removed from {interfaceName}.");
     }
 
     [PlatformFact]
@@ -162,7 +218,7 @@ public sealed class RouteLookupPlatformTests
         monitor.Dispose();
     }
 
-    [PlatformTheory]
+    [PlatformTheory(RequiresElevation = true)]
     [InlineData(AddressFamily.InterNetwork)]
     [InlineData(AddressFamily.InterNetworkV6)]
     public async Task AddAddress_NewLoopbackAddress_AcceptsConnectionsRightAway(AddressFamily addressFamily)
@@ -195,6 +251,22 @@ public sealed class RouteLookupPlatformTests
                 lease.Disposable.Dispose();
             }
         }
+    }
+
+    private static bool TryGetRealInterface(out string interfaceName)
+    {
+        try
+        {
+            interfaceName = NetworkInterfaceHelpers.GetDefaultRouteInterface(AddressFamily.InterNetwork);
+        }
+        catch (SocketException)
+        {
+            interfaceName = string.Empty;
+            return false;
+        }
+
+        PlatformTestHelpers.RemoveLeftoverRealInterfaceAddresses(interfaceName);
+        return true;
     }
 
     private static RouteLookup? LookUpNativeRoute(IPAddress destination, int interfaceIndex)
