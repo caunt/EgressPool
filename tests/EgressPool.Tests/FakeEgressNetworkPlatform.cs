@@ -6,6 +6,9 @@ namespace Egress.Tests;
 
 internal sealed class FakeEgressNetworkPlatform : IEgressNetworkPlatform
 {
+    // Spare refills call the platform from background tasks.
+    private readonly object syncRoot = new();
+
     public bool SupportsTrueNonLocalBind { get; init; } = true;
 
     public bool SupportsManagedLocalRoutes { get; init; } = true;
@@ -141,13 +144,16 @@ internal sealed class FakeEgressNetworkPlatform : IEgressNetworkPlatform
 
     public PlatformNetworkStateLease AddAddress(string interfaceName, IPAddress address, int prefixLength)
     {
-        AddAddressCallCount++;
         FakeAddressOperation operation = new(interfaceName, address, prefixLength);
-        AddedAddresses.Add(operation);
-
-        if (FailAddAddressOnCall == AddAddressCallCount)
+        lock (syncRoot)
         {
-            throw new InvalidOperationException("Address add failed.");
+            AddAddressCallCount++;
+            AddedAddresses.Add(operation);
+
+            if (FailAddAddressOnCall == AddAddressCallCount)
+            {
+                throw new InvalidOperationException("Address add failed.");
+            }
         }
 
         if (ReturnNotCreatedAddressLease)
@@ -182,19 +188,25 @@ internal sealed class FakeEgressNetworkPlatform : IEgressNetworkPlatform
     public ValueTask<AddressWarmUpResult> WarmUpAddressAsync(string interfaceName, IPAddress address, TimeSpan timeout, CancellationToken cancellationToken)
     {
         FakeWarmUpRequest request = new(interfaceName, address, timeout);
-        WarmUpRequests.Add(request);
+        lock (syncRoot)
+        {
+            WarmUpRequests.Add(request);
+        }
 
         return WarmUpHandler?.Invoke(request, cancellationToken) ?? ValueTask.FromResult(WarmUpResult);
     }
 
     private void DeleteAddress(FakeAddressOperation operation)
     {
-        DeleteAddressCallCount++;
-        DeletedAddresses.Add(operation);
-
-        if (FailDeleteAddressOnCall == DeleteAddressCallCount)
+        lock (syncRoot)
         {
-            throw new InvalidOperationException("Address delete failed.");
+            DeleteAddressCallCount++;
+            DeletedAddresses.Add(operation);
+
+            if (FailDeleteAddressOnCall == DeleteAddressCallCount)
+            {
+                throw new InvalidOperationException("Address delete failed.");
+            }
         }
     }
 

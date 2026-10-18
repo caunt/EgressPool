@@ -64,7 +64,41 @@ public sealed record EgressPoolOptions
 
     /// <summary>
     /// Gets the maximum time to wait for the gateway's echo reply when warming up an assigned IPv6 address.
-    /// After repeated missing replies on an interface, warm-ups there send the echo request without waiting for a while.
+    /// The echo request is resent every second until a reply arrives. A connection proceeds when the time runs out.
+    /// Warm-ups on an interface whose gateway has never answered are skipped and retried every few minutes.
     /// </summary>
-    public TimeSpan AddressWarmUpTimeout { get; set; } = TimeSpan.FromSeconds(1);
+    public TimeSpan AddressWarmUpTimeout { get; set; } = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// Gets the number of already warmed IPv6 addresses kept ready for each interface and prefix the pool has used,
+    /// so new connections get an address without waiting for the gateway. Spares stay assigned to the interface while unused,
+    /// are refreshed with an echo request every 30 seconds, and are removed after 5 minutes without connections.
+    /// Spares are kept only for IPv6 addresses the pool assigns to an interface, and only when <see cref="WarmUpAssignedAddresses" /> is enabled.
+    /// Zero disables spares.
+    /// </summary>
+    public int SpareAddressCount { get; set; }
+
+    /// <summary>
+    /// Gets the maximum number of connections or leases that share one assigned address before the pool assigns a new one.
+    /// The default of one gives every connection its own address. Applies only to addresses the pool assigns to an interface.
+    /// </summary>
+    public int MaxConnectionsPerAddress { get; set; } = 1;
+
+    /// <summary>
+    /// Gets how long after its first connection an assigned address may be shared when <see cref="MaxConnectionsPerAddress" /> is greater than one.
+    /// <see langword="null" /> limits sharing by connection count only.
+    /// </summary>
+    public TimeSpan? MaxAddressReuseDuration { get; set; }
+
+    /// <summary>
+    /// Gets the maximum number of new addresses the pool assigns to one interface within <see cref="NewAddressRateWindow" />,
+    /// because every new address costs the gateway a neighbor resolution. Requests over the limit are never rejected;
+    /// they wait in order until the moving window has room. Reused addresses and ready spares do not count. Zero disables the limit.
+    /// </summary>
+    public int NewAddressRateLimit { get; set; }
+
+    /// <summary>
+    /// Gets the length of the moving window for <see cref="NewAddressRateLimit" />.
+    /// </summary>
+    public TimeSpan NewAddressRateWindow { get; set; } = TimeSpan.FromSeconds(1);
 }

@@ -14,15 +14,21 @@ namespace Egress;
 /// </summary>
 public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceTracker
 {
+    private static readonly TimeSpan AddressMaintenanceInterval = TimeSpan.FromSeconds(5);
+
     private readonly EgressPoolOptions options;
     private readonly IEgressNetworkPlatform platform;
     private readonly ILogger<EgressPool>? logger;
+    private readonly TimeProvider timeProvider;
     private readonly EgressPrefix[] prefixes;
     private readonly ConcurrentDictionary<IDisposable, byte> activeResources = [];
+    private readonly ConcurrentDictionary<AssignedAddressSourceKey, AssignedAddressSource> assignedAddressSources = new();
     private readonly List<IDisposable> localRouteLeases = [];
     private readonly object lifecycleLock = new();
-    private readonly AddressWarmUpTracker addressWarmUpTracker;
+    private readonly CancellationTokenSource lifetimeTokenSource = new();
+    private readonly AddressAssignmentContext addressAssignmentContext;
     private ProcessCleanupRegistration? processCleanupRegistration;
+    private ITimer? addressMaintenanceTimer;
     private int disposed;
 
     internal EgressPool(EgressPoolOptions options, IEgressNetworkPlatform platform, ILogger<EgressPool>? logger = null, TimeProvider? timeProvider = null)
@@ -30,7 +36,15 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
         this.options = ValidateOptions(options);
         this.platform = platform;
         this.logger = logger;
-        addressWarmUpTracker = new AddressWarmUpTracker(timeProvider ?? TimeProvider.System);
+        this.timeProvider = timeProvider ?? TimeProvider.System;
+        addressAssignmentContext = new AddressAssignmentContext(
+            this.options,
+            platform,
+            new AddressWarmUpService(this.options, platform, logger, this.timeProvider),
+            new NewAddressRateLimiter(this.options, this.timeProvider),
+            this.timeProvider,
+            logger,
+            lifetimeTokenSource.Token);
         prefixes = CreateEffectivePrefixes(this.options, platform, logger);
     }
 
@@ -136,13 +150,13 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
 
                 cancellationToken.ThrowIfCancellationRequested();
 
-                EgressAddressLease lease = RentAddress(destinationAddress.AddressFamily, destinationAddress, trackStandaloneLease: false);
+                EgressAddressLease lease = await RentAddressCoreAsync(destinationAddress.AddressFamily, destinationAddress, trackStandaloneLease: false, cancellationToken).ConfigureAwait(false);
                 LeasedSocket socket = new(lease, this, destinationAddress.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
                 RegisterActiveOrDispose(socket);
 
                 try
                 {
-                    await WarmUpAddressIfRequiredAsync(lease, cancellationToken).ConfigureAwait(false);
+                    await lease.WaitForWarmUpAsync(cancellationToken).ConfigureAwait(false);
                     PrepareSocket(socket, lease);
                     socket.Bind(new IPEndPoint(lease.Address, 0));
                     await socket.ConnectAsync(new IPEndPoint(destinationAddress, port), cancellationToken).ConfigureAwait(false);
@@ -198,12 +212,13 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
 
     private EgressUdpClient CreateUdpClient(AddressFamily addressFamily, IPAddress? destinationAddress)
     {
-        EgressAddressLease lease = RentAddress(addressFamily, destinationAddress, trackStandaloneLease: false);
+        // Synchronous callers accept blocking: the rate limit and warm-up waits are bounded by their configuration.
+        EgressAddressLease lease = WaitSynchronously(RentAddressCoreAsync(addressFamily, destinationAddress, trackStandaloneLease: false, CancellationToken.None));
         Socket? socket = null;
 
         try
         {
-            WarmUpAddressIfRequired(lease);
+            WaitSynchronously(lease.WaitForWarmUpAsync(CancellationToken.None));
             socket = new Socket(addressFamily, SocketType.Dgram, ProtocolType.Udp);
             PrepareSocket(socket, lease);
             socket.Bind(new IPEndPoint(lease.Address, 0));
@@ -256,7 +271,7 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
         ThrowIfDisposed();
 
         AddressFamily addressFamily = ResolveAddressFamily();
-        return WarmUpRentedAddressAsync(RentAddress(addressFamily, null, trackStandaloneLease: true), cancellationToken);
+        return RentWarmedAddressAsync(addressFamily, null, cancellationToken);
     }
 
     /// <summary>
@@ -272,13 +287,14 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
         ThrowIfDisposed();
         ValidateAddressFamily(destinationAddress.AddressFamily);
 
-        return WarmUpRentedAddressAsync(RentAddress(destinationAddress.AddressFamily, destinationAddress, trackStandaloneLease: true), cancellationToken);
+        return RentWarmedAddressAsync(destinationAddress.AddressFamily, destinationAddress, cancellationToken);
     }
 
     /// <inheritdoc />
     public void Dispose()
     {
         ProcessCleanupRegistration? cleanupRegistration;
+        ITimer? maintenanceTimer;
         IDisposable[] activeResourcesSnapshot;
         IDisposable[] localRouteLeasesSnapshot;
 
@@ -292,6 +308,8 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
             Volatile.Write(ref disposed, 1);
             cleanupRegistration = processCleanupRegistration;
             processCleanupRegistration = null;
+            maintenanceTimer = addressMaintenanceTimer;
+            addressMaintenanceTimer = null;
             activeResourcesSnapshot = activeResources.Keys.ToArray();
             localRouteLeasesSnapshot = localRouteLeases.ToArray();
             localRouteLeases.Clear();
@@ -303,6 +321,14 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
         foreach (IDisposable activeResource in activeResourcesSnapshot)
         {
             DisposeCollecting(activeResource, exceptions);
+        }
+
+        // Sockets and leases released their addresses above; the sources now remove spares and idle reused addresses.
+        maintenanceTimer?.Dispose();
+        lifetimeTokenSource.Cancel();
+        foreach (AssignedAddressSource assignedAddressSource in assignedAddressSources.Values)
+        {
+            DisposeCollecting(assignedAddressSource, exceptions);
         }
 
         for (int routeLeaseIndex = localRouteLeasesSnapshot.Length - 1; routeLeaseIndex >= 0; routeLeaseIndex--)
@@ -365,12 +391,28 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
         return new NetworkStream(socket, ownsSocket: true);
     }
 
-    private EgressAddressLease RentAddress(AddressFamily requestedAddressFamily, IPAddress? destinationAddress, bool trackStandaloneLease)
+    private async ValueTask<EgressAddressLease> RentWarmedAddressAsync(AddressFamily requestedAddressFamily, IPAddress? destinationAddress, CancellationToken cancellationToken)
+    {
+        EgressAddressLease lease = await RentAddressCoreAsync(requestedAddressFamily, destinationAddress, trackStandaloneLease: true, cancellationToken).ConfigureAwait(false);
+
+        try
+        {
+            await lease.WaitForWarmUpAsync(cancellationToken).ConfigureAwait(false);
+            return lease;
+        }
+        catch
+        {
+            lease.Dispose();
+            throw;
+        }
+    }
+
+    private async ValueTask<EgressAddressLease> RentAddressCoreAsync(AddressFamily requestedAddressFamily, IPAddress? destinationAddress, bool trackStandaloneLease, CancellationToken cancellationToken)
     {
         string interfaceName = SelectInterface(requestedAddressFamily, destinationAddress);
         SelectedEgressAddress selectedAddress = options.AddressMode == EgressAddressMode.PreAssignedOnly
             ? SelectPreAssignedAddress(interfaceName, requestedAddressFamily, destinationAddress)
-            : SelectGeneratedAddress(interfaceName, requestedAddressFamily, destinationAddress);
+            : await SelectGeneratedAddressAsync(interfaceName, requestedAddressFamily, destinationAddress, cancellationToken).ConfigureAwait(false);
 
         if (!trackStandaloneLease)
         {
@@ -382,23 +424,17 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
         return lease;
     }
 
-    private SelectedEgressAddress SelectGeneratedAddress(string interfaceName, AddressFamily requestedAddressFamily, IPAddress? destinationAddress)
+    private async ValueTask<SelectedEgressAddress> SelectGeneratedAddressAsync(string interfaceName, AddressFamily requestedAddressFamily, IPAddress? destinationAddress, CancellationToken cancellationToken)
     {
         if (destinationAddress is null)
         {
             EgressPrefix prefix = SelectRandomPrefix(requestedAddressFamily);
-            IPAddress selectedAddress = AddressSelector.SelectRandom(prefix.Network);
-            int leasePrefixLength = GetHostPrefixLength(requestedAddressFamily);
-            PlatformNetworkStateLease assignmentLease = AcquireAddressIfRequired(interfaceName, selectedAddress, leasePrefixLength, prefix);
-            return new SelectedEgressAddress(selectedAddress, leasePrefixLength, prefix, assignmentLease.Disposable, assignmentLease.Created);
+            return await AcquireGeneratedAddressAsync(interfaceName, prefix, requestedAddressFamily, cancellationToken).ConfigureAwait(false);
         }
 
         if (TrySelectSingleConfiguredPrefix(requestedAddressFamily, out EgressPrefix singleConfiguredPrefix))
         {
-            IPAddress selectedAddress = AddressSelector.SelectRandom(singleConfiguredPrefix.Network);
-            int leasePrefixLength = GetHostPrefixLength(requestedAddressFamily);
-            PlatformNetworkStateLease assignmentLease = AcquireAddressIfRequired(interfaceName, selectedAddress, leasePrefixLength, singleConfiguredPrefix);
-            return new SelectedEgressAddress(selectedAddress, leasePrefixLength, singleConfiguredPrefix, assignmentLease.Disposable, assignmentLease.Created);
+            return await AcquireGeneratedAddressAsync(interfaceName, singleConfiguredPrefix, requestedAddressFamily, cancellationToken).ConfigureAwait(false);
         }
 
         IPAddressScope destinationScope = IPAddressScopeClassifier.GetScope(destinationAddress);
@@ -415,18 +451,15 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
         for (int candidateOffset = 0; candidateOffset < candidatePrefixes.Length; candidateOffset++)
         {
             EgressPrefix candidatePrefix = candidatePrefixes[(startIndex + candidateOffset) % candidatePrefixes.Length];
-            IPAddress selectedAddress = AddressSelector.SelectRandom(candidatePrefix.Network);
-            int leasePrefixLength = GetHostPrefixLength(requestedAddressFamily);
-            PlatformNetworkStateLease assignmentLease = PlatformNetworkStateLease.NotCreated;
+            SelectedEgressAddress candidate = await AcquireGeneratedAddressAsync(interfaceName, candidatePrefix, requestedAddressFamily, cancellationToken).ConfigureAwait(false);
 
             try
             {
-                assignmentLease = AcquireAddressIfRequired(interfaceName, selectedAddress, leasePrefixLength, candidatePrefix);
                 EgressAddressLease probeLease = new(
-                    selectedAddress,
+                    candidate.Address,
                     interfaceName,
-                    leasePrefixLength,
-                    assignmentLease.Disposable.Dispose,
+                    candidate.LeasePrefixLength,
+                    candidate.AssignmentLease.Dispose,
                     usesAutoDetectedPrefix: candidatePrefix.IsAutoDetected,
                     usesNonLocalBind: ShouldUseTrueNonLocalBind(candidatePrefix));
 
@@ -436,9 +469,9 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
                         "Selected egress prefix {Prefix} from {PrefixSource} with source address {SourceAddress} for destination {DestinationAddress}.",
                         candidatePrefix.Network,
                         candidatePrefix.Source,
-                        selectedAddress,
+                        candidate.Address,
                         destinationAddress);
-                    return new SelectedEgressAddress(selectedAddress, leasePrefixLength, candidatePrefix, assignmentLease.Disposable, assignmentLease.Created);
+                    return candidate;
                 }
 
                 lastProbeException = probeException;
@@ -447,16 +480,16 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
                     "Rejected egress prefix {Prefix} from {PrefixSource} with source address {SourceAddress} for destination {DestinationAddress}.",
                     candidatePrefix.Network,
                     candidatePrefix.Source,
-                    selectedAddress,
+                    candidate.Address,
                     destinationAddress);
             }
             catch
             {
-                assignmentLease.Disposable.Dispose();
+                candidate.AssignmentLease.Dispose();
                 throw;
             }
 
-            assignmentLease.Disposable.Dispose();
+            candidate.AssignmentLease.Dispose();
         }
 
         throw CreateNoReachablePrefixException(destinationAddress, destinationScope, requestedAddressFamily, candidatePrefixes, lastProbeException);
@@ -479,7 +512,7 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
                     assignedAddress.PrefixLength,
                     prefix,
                     NoopDisposable.Instance,
-                    CreatedAddress: false));
+                    AssignedAddress: null));
             }
         }
 
@@ -538,7 +571,7 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
             activeResourceTracker,
             selectedAddress.Prefix.IsAutoDetected,
             ShouldUseTrueNonLocalBind(selectedAddress.Prefix),
-            selectedAddress.CreatedAddress);
+            selectedAddress.AssignedAddress);
 
     private EgressPrefix SelectRandomPrefix(AddressFamily requestedAddressFamily)
     {
@@ -665,142 +698,78 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
         return false;
     }
 
-    private PlatformNetworkStateLease AcquireAddressIfRequired(string interfaceName, IPAddress address, int prefixLength, EgressPrefix prefix)
+    private async ValueTask<SelectedEgressAddress> AcquireGeneratedAddressAsync(string interfaceName, EgressPrefix prefix, AddressFamily requestedAddressFamily, CancellationToken cancellationToken)
     {
-        if (options.AddressMode == EgressAddressMode.AssignOnDemand ||
-            (options.AddressMode == EgressAddressMode.NonLocalBind && !ShouldUseTrueNonLocalBind(prefix)))
+        int leasePrefixLength = GetHostPrefixLength(requestedAddressFamily);
+        if (!RequiresAddressAssignment(prefix))
         {
-            return AcquireAddress(interfaceName, address, prefixLength);
+            return new SelectedEgressAddress(AddressSelector.SelectRandom(prefix.Network), leasePrefixLength, prefix, NoopDisposable.Instance, AssignedAddress: null);
         }
 
-        return PlatformNetworkStateLease.NotCreated;
+        AssignedAddressSource source = GetAssignedAddressSource(interfaceName, prefix.Network, leasePrefixLength);
+        AssignedAddress assignedAddress = await source.AcquireAsync(cancellationToken).ConfigureAwait(false);
+        return new SelectedEgressAddress(assignedAddress.Address, leasePrefixLength, prefix, new ActionDisposable(assignedAddress.ReleaseLease), assignedAddress);
     }
 
-    private bool RequiresWarmUp(EgressAddressLease lease) =>
-        options.WarmUpAssignedAddresses &&
-        lease.CreatedAddress &&
-        lease.AddressFamily == AddressFamily.InterNetworkV6;
+    private bool RequiresAddressAssignment(EgressPrefix prefix) =>
+        options.AddressMode == EgressAddressMode.AssignOnDemand ||
+        (options.AddressMode == EgressAddressMode.NonLocalBind && !ShouldUseTrueNonLocalBind(prefix));
 
-    private ValueTask<EgressAddressLease> WarmUpRentedAddressAsync(EgressAddressLease lease, CancellationToken cancellationToken)
+    private AssignedAddressSource GetAssignedAddressSource(string interfaceName, IPNetwork prefix, int hostPrefixLength)
     {
-        if (!RequiresWarmUp(lease))
+        AssignedAddressSourceKey key = new(interfaceName, prefix);
+        if (assignedAddressSources.TryGetValue(key, out AssignedAddressSource? source))
         {
-            return ValueTask.FromResult(lease);
+            return source;
         }
 
-        return WarmUpRentedAddressCoreAsync(lease, cancellationToken);
-    }
+        lock (lifecycleLock)
+        {
+            ThrowIfDisposed();
 
-    private async ValueTask<EgressAddressLease> WarmUpRentedAddressCoreAsync(EgressAddressLease lease, CancellationToken cancellationToken)
-    {
-        try
-        {
-            await WarmUpAddressIfRequiredAsync(lease, cancellationToken).ConfigureAwait(false);
-            return lease;
-        }
-        catch
-        {
-            lease.Dispose();
-            throw;
-        }
-    }
+            if (!assignedAddressSources.TryGetValue(key, out source))
+            {
+                source = new AssignedAddressSource(addressAssignmentContext, interfaceName, prefix, hostPrefixLength);
+                assignedAddressSources[key] = source;
+            }
 
-    private void WarmUpAddressIfRequired(EgressAddressLease lease)
-    {
-        if (!RequiresWarmUp(lease))
-        {
-            return;
-        }
+            // Spares and reused addresses need periodic refresh and retirement; one-off addresses do not.
+            if (addressMaintenanceTimer is null && (options.SpareAddressCount > 0 || options.MaxConnectionsPerAddress > 1))
+            {
+                addressMaintenanceTimer = timeProvider.CreateTimer(
+                    static state => ((EgressPool)state!).RunAddressMaintenance(),
+                    this,
+                    AddressMaintenanceInterval,
+                    AddressMaintenanceInterval);
+            }
 
-        // Synchronous callers accept blocking; the wait is bounded by the warm-up timeout.
-        WarmUpAddressIfRequiredAsync(lease, CancellationToken.None).AsTask().GetAwaiter().GetResult();
-    }
-
-    private async ValueTask WarmUpAddressIfRequiredAsync(EgressAddressLease lease, CancellationToken cancellationToken)
-    {
-        if (!RequiresWarmUp(lease))
-        {
-            return;
-        }
-
-        TimeSpan timeout = addressWarmUpTracker.GetTimeout(lease.InterfaceName, options.AddressWarmUpTimeout);
-        AddressWarmUpResult result;
-
-        try
-        {
-            result = await platform.WarmUpAddressAsync(lease.InterfaceName, lease.Address, timeout, cancellationToken).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception exception)
-        {
-            result = new AddressWarmUpResult(AddressWarmUpStatus.Failed, Exception: exception);
-        }
-
-        LogAddressWarmUp(lease, result, timeout);
-
-        AddressWarmUpTransition transition = addressWarmUpTracker.Record(lease.InterfaceName, result.Status);
-        if (transition == AddressWarmUpTransition.EnteredSendOnly)
-        {
-            logger?.LogDebug(
-                "Gateway {Gateway} on interface {InterfaceName} did not answer {NoReplyCount} consecutive warm-up echo requests; sending warm-up echo requests without waiting for {SendOnlyDuration}.",
-                result.Gateway,
-                lease.InterfaceName,
-                AddressWarmUpTracker.NoReplyThreshold,
-                AddressWarmUpTracker.SendOnlyDuration);
-        }
-        else if (transition == AddressWarmUpTransition.LeftSendOnly)
-        {
-            logger?.LogDebug(
-                "Gateway {Gateway} on interface {InterfaceName} answered a warm-up echo request again; waiting for warm-up echo replies.",
-                result.Gateway,
-                lease.InterfaceName);
+            return source;
         }
     }
 
-    private void LogAddressWarmUp(EgressAddressLease lease, AddressWarmUpResult result, TimeSpan timeout)
+    private void RunAddressMaintenance()
     {
-        switch (result.Status)
+        foreach (AssignedAddressSource assignedAddressSource in assignedAddressSources.Values)
         {
-            case AddressWarmUpStatus.Replied:
-                logger?.LogDebug(
-                    "Warmed up source address {SourceAddress} on interface {InterfaceName}; gateway {Gateway} replied in {RoundTripTimeMilliseconds:0.###} ms.",
-                    lease.Address,
-                    lease.InterfaceName,
-                    result.Gateway,
-                    result.RoundTripTime.TotalMilliseconds);
-                break;
-            case AddressWarmUpStatus.Sent:
-                logger?.LogDebug(
-                    "Sent warm-up echo request from source address {SourceAddress} on interface {InterfaceName} to gateway {Gateway} without waiting for a reply.",
-                    lease.Address,
-                    lease.InterfaceName,
-                    result.Gateway);
-                break;
-            case AddressWarmUpStatus.NoReply:
-                logger?.LogDebug(
-                    "Gateway {Gateway} did not answer the warm-up echo request from source address {SourceAddress} on interface {InterfaceName} within {TimeoutMilliseconds} ms.",
-                    result.Gateway,
-                    lease.Address,
-                    lease.InterfaceName,
-                    timeout.TotalMilliseconds);
-                break;
-            case AddressWarmUpStatus.Failed:
-                logger?.LogDebug(
-                    result.Exception,
-                    "Could not warm up source address {SourceAddress} on interface {InterfaceName} through gateway {Gateway}.",
-                    lease.Address,
-                    lease.InterfaceName,
-                    result.Gateway);
-                break;
-            default:
-                logger?.LogTrace(
-                    "Skipped warm-up of source address {SourceAddress} because interface {InterfaceName} has no IPv6 gateway.",
-                    lease.Address,
-                    lease.InterfaceName);
-                break;
+            try
+            {
+                assignedAddressSource.RunMaintenance();
+            }
+            catch (Exception exception)
+            {
+                logger?.LogDebug(exception, "Source address maintenance failed.");
+            }
+        }
+    }
+
+    private static T WaitSynchronously<T>(ValueTask<T> task) =>
+        task.IsCompletedSuccessfully ? task.Result : task.AsTask().GetAwaiter().GetResult();
+
+    private static void WaitSynchronously(ValueTask task)
+    {
+        if (!task.IsCompletedSuccessfully)
+        {
+            task.AsTask().GetAwaiter().GetResult();
         }
     }
 
@@ -916,26 +885,6 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
         if (lease.UsesNonLocalBind)
         {
             platform.EnableNonLocalBind(socket, lease.AddressFamily);
-        }
-    }
-
-    private PlatformNetworkStateLease AcquireAddress(string interfaceName, IPAddress address, int prefixLength)
-    {
-        PlatformNetworkStateLease platformLease = default;
-
-        try
-        {
-            platformLease = platform.AddAddress(interfaceName, address, prefixLength);
-            return platformLease;
-        }
-        catch
-        {
-            if (platformLease.Created)
-            {
-                platformLease.Disposable.Dispose();
-            }
-
-            throw;
         }
     }
 
@@ -1246,9 +1195,34 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
             throw new ArgumentException("LocalRouteInterfaceName is required when local route management is enabled.", nameof(options));
         }
 
-        if (options.AddressWarmUpTimeout <= TimeSpan.Zero || options.AddressWarmUpTimeout.TotalMilliseconds > int.MaxValue)
+        if (!IsValidDuration(options.AddressWarmUpTimeout))
         {
             throw new ArgumentException("AddressWarmUpTimeout must be greater than zero and at most Int32.MaxValue milliseconds.", nameof(options));
+        }
+
+        if (options.SpareAddressCount < 0)
+        {
+            throw new ArgumentException("SpareAddressCount must not be negative.", nameof(options));
+        }
+
+        if (options.MaxConnectionsPerAddress < 1)
+        {
+            throw new ArgumentException("MaxConnectionsPerAddress must be at least one.", nameof(options));
+        }
+
+        if (options.MaxAddressReuseDuration is { } maxAddressReuseDuration && !IsValidDuration(maxAddressReuseDuration))
+        {
+            throw new ArgumentException("MaxAddressReuseDuration must be greater than zero and at most Int32.MaxValue milliseconds.", nameof(options));
+        }
+
+        if (options.NewAddressRateLimit < 0)
+        {
+            throw new ArgumentException("NewAddressRateLimit must not be negative.", nameof(options));
+        }
+
+        if (!IsValidDuration(options.NewAddressRateWindow))
+        {
+            throw new ArgumentException("NewAddressRateWindow must be greater than zero and at most Int32.MaxValue milliseconds.", nameof(options));
         }
 
         return options with
@@ -1256,6 +1230,9 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
             Prefixes = prefixes,
         };
     }
+
+    private static bool IsValidDuration(TimeSpan duration) =>
+        duration > TimeSpan.Zero && duration.TotalMilliseconds <= int.MaxValue;
 
     private static void ValidateAddressFamily(AddressFamily addressFamily)
     {
@@ -1378,7 +1355,9 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
         int LeasePrefixLength,
         EgressPrefix Prefix,
         IDisposable AssignmentLease,
-        bool CreatedAddress);
+        AssignedAddress? AssignedAddress);
+
+    private readonly record struct AssignedAddressSourceKey(string InterfaceName, IPNetwork Prefix);
 
     private static class RandomNumberGeneratorShim
     {

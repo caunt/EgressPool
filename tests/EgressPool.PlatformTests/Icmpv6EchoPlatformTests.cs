@@ -15,15 +15,6 @@ public sealed class Icmpv6EchoPlatformTests
         Assert.True(result.Status == AddressWarmUpStatus.Replied, $"Expected an echo reply but got {result.Status}: {result.Exception}");
         Assert.Equal(IPAddress.IPv6Loopback, result.Gateway);
         Assert.True(result.RoundTripTime < TimeSpan.FromSeconds(5));
-    }
-
-    [PlatformFact]
-    public async Task SendAsync_ZeroTimeout_ReturnsSentWithoutWaiting()
-    {
-        using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(15));
-
-        AddressWarmUpResult result = await Icmpv6Echo.SendAsync(IPAddress.IPv6Loopback, IPAddress.IPv6Loopback, TimeSpan.Zero, timeout.Token);
-
-        Assert.True(result.Status == AddressWarmUpStatus.Sent, $"Expected the echo request to be sent but got {result.Status}: {result.Exception}");
+        Assert.Equal(1, result.EchoCount);
     }
 }

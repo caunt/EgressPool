@@ -234,7 +234,7 @@ public sealed class AddressWarmUpTests
 
         await AssertConnectsOverIpv6LoopbackAsync(platform, logger);
 
-        Assert.Contains(logger.Messages, message => message.Contains("did not answer the warm-up echo request", StringComparison.Ordinal) && message.Contains("fe80::1", StringComparison.Ordinal));
+        Assert.Contains(logger.Messages, message => message.Contains("did not answer", StringComparison.Ordinal) && message.Contains("fe80::1", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -291,89 +291,6 @@ public sealed class AddressWarmUpTests
     }
 
     [Fact]
-    public async Task RentAddressAsync_GatewayIgnoresThreeEchoRequests_SendsWithoutWaitingUntilWindowExpires()
-    {
-        ManualTimeProvider timeProvider = new();
-        TestLogger<EgressPool> logger = new();
-        FakeEgressNetworkPlatform platform = new()
-        {
-            WarmUpHandler = (request, _) => ValueTask.FromResult(request.Timeout == TimeSpan.Zero
-                ? new AddressWarmUpResult(AddressWarmUpStatus.Sent, Gateway)
-                : new AddressWarmUpResult(AddressWarmUpStatus.NoReply, Gateway)),
-        };
-
-        using EgressPool pool = EgressPool.CreateForTests(CreateIpv6Options(EgressAddressMode.AssignOnDemand), platform, logger, timeProvider);
-        await RentAndReleaseAsync(pool, count: 5);
-        timeProvider.Advance(AddressWarmUpTracker.SendOnlyDuration - TimeSpan.FromSeconds(1));
-        await RentAndReleaseAsync(pool, count: 1);
-        timeProvider.Advance(TimeSpan.FromSeconds(1));
-        await RentAndReleaseAsync(pool, count: 1);
-
-        TimeSpan[] observedTimeouts = platform.WarmUpRequests.Select(static request => request.Timeout).ToArray();
-        Assert.Equal(
-            [ConfiguredTimeout, ConfiguredTimeout, ConfiguredTimeout, TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero, ConfiguredTimeout],
-            observedTimeouts);
-        Assert.Contains(logger.Messages, message => message.Contains("did not answer 3 consecutive warm-up echo requests", StringComparison.Ordinal));
-    }
-
-    [Fact]
-    public async Task RentAddressAsync_GatewayRepliesAgain_WaitsForRepliesAgain()
-    {
-        ManualTimeProvider timeProvider = new();
-        TestLogger<EgressPool> logger = new();
-        Queue<AddressWarmUpStatus> statuses = new([
-            AddressWarmUpStatus.NoReply,
-            AddressWarmUpStatus.NoReply,
-            AddressWarmUpStatus.Replied,
-            AddressWarmUpStatus.NoReply,
-            AddressWarmUpStatus.NoReply,
-            AddressWarmUpStatus.NoReply,
-            AddressWarmUpStatus.Replied,
-            AddressWarmUpStatus.Replied,
-        ]);
-        FakeEgressNetworkPlatform platform = new()
-        {
-            WarmUpHandler = (_, _) => ValueTask.FromResult(new AddressWarmUpResult(statuses.Dequeue(), Gateway)),
-        };
-
-        using EgressPool pool = EgressPool.CreateForTests(CreateIpv6Options(EgressAddressMode.AssignOnDemand), platform, logger, timeProvider);
-        await RentAndReleaseAsync(pool, count: 6);
-        timeProvider.Advance(AddressWarmUpTracker.SendOnlyDuration);
-        await RentAndReleaseAsync(pool, count: 2);
-
-        Assert.All(platform.WarmUpRequests, request => Assert.Equal(ConfiguredTimeout, request.Timeout));
-        Assert.Contains(logger.Messages, message => message.Contains("answered a warm-up echo request again", StringComparison.Ordinal));
-    }
-
-    [Fact]
-    public async Task RentAddressAsync_FailedWarmUps_KeepWaitingForReplies()
-    {
-        FakeEgressNetworkPlatform platform = new()
-        {
-            WarmUpResult = new AddressWarmUpResult(AddressWarmUpStatus.Failed, Gateway, Exception: new SocketException((int)SocketError.AccessDenied)),
-        };
-
-        using EgressPool pool = EgressPool.CreateForTests(CreateIpv6Options(EgressAddressMode.AssignOnDemand), platform);
-        await RentAndReleaseAsync(pool, count: 5);
-
-        Assert.All(platform.WarmUpRequests, request => Assert.Equal(ConfiguredTimeout, request.Timeout));
-    }
-
-    [Fact]
-    public void AddressWarmUpTracker_NoRepliesOnOneInterface_KeepsOtherInterfacesWaiting()
-    {
-        AddressWarmUpTracker tracker = new(new ManualTimeProvider());
-
-        for (int attempt = 0; attempt < AddressWarmUpTracker.NoReplyThreshold; attempt++)
-        {
-            tracker.Record("eth0", AddressWarmUpStatus.NoReply);
-        }
-
-        Assert.Equal(TimeSpan.Zero, tracker.GetTimeout("eth0", ConfiguredTimeout));
-        Assert.Equal(ConfiguredTimeout, tracker.GetTimeout("eth1", ConfiguredTimeout));
-    }
-
-    [Fact]
     public void BuildEchoRequest_IdentifierAndSequence_WritesEchoRequestHeader()
     {
         byte[] packet = new byte[Icmpv6Echo.HeaderLength + Icmpv6Echo.PayloadLength];
@@ -389,7 +306,16 @@ public sealed class AddressWarmUpTests
         byte[] payload = CreatePayload();
         byte[] reply = CreateMessage(Icmpv6Echo.EchoReplyType, identifier: 0x7777, sequence: 0xABCD, payload);
 
-        Assert.True(Icmpv6Echo.IsMatchingEchoReply(reply, 0xABCD, payload));
+        Assert.True(Icmpv6Echo.IsMatchingEchoReply(reply, firstSequence: 0xABCD, sentCount: 1, payload));
+    }
+
+    [Fact]
+    public void IsMatchingEchoReply_ReplyToEarlierEchoAcrossSequenceWrap_ReturnsTrue()
+    {
+        byte[] payload = CreatePayload();
+        byte[] reply = CreateMessage(Icmpv6Echo.EchoReplyType, identifier: 0x1234, sequence: 0x0000, payload);
+
+        Assert.True(Icmpv6Echo.IsMatchingEchoReply(reply, firstSequence: 0xFFFF, sentCount: 2, payload));
     }
 
     [Theory]
@@ -403,7 +329,7 @@ public sealed class AddressWarmUpTests
         byte[] message = CreateMessage(
             difference == "request" ? Icmpv6Echo.EchoRequestType : Icmpv6Echo.EchoReplyType,
             identifier: 0x1234,
-            sequence: difference == "sequence" ? (ushort)0xABCE : (ushort)0xABCD,
+            sequence: difference == "sequence" ? (ushort)0xABCF : (ushort)0xABCD,
             payload);
 
         if (difference == "payload")
@@ -416,7 +342,7 @@ public sealed class AddressWarmUpTests
             message = message[..^1];
         }
 
-        Assert.False(Icmpv6Echo.IsMatchingEchoReply(message, 0xABCD, payload));
+        Assert.False(Icmpv6Echo.IsMatchingEchoReply(message, firstSequence: 0xABCD, sentCount: 2, payload));
     }
 
     private static EgressPoolOptions CreateIpv6Options(EgressAddressMode addressMode) =>
@@ -504,14 +430,5 @@ public sealed class AddressWarmUpTests
         message[7] = (byte)sequence;
         payload.CopyTo(message, Icmpv6Echo.HeaderLength);
         return message;
-    }
-
-    private sealed class ManualTimeProvider : TimeProvider
-    {
-        private DateTimeOffset utcNow = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
-
-        public override DateTimeOffset GetUtcNow() => utcNow;
-
-        internal void Advance(TimeSpan duration) => utcNow += duration;
     }
 }

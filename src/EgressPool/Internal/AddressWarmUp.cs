@@ -22,7 +22,6 @@ internal static class AddressWarmUp
 internal enum AddressWarmUpStatus
 {
     Skipped,
-    Sent,
     Replied,
     NoReply,
     Failed,
@@ -32,7 +31,8 @@ internal readonly record struct AddressWarmUpResult(
     AddressWarmUpStatus Status,
     IPAddress? Gateway = null,
     TimeSpan RoundTripTime = default,
-    Exception? Exception = null)
+    Exception? Exception = null,
+    int EchoCount = 0)
 {
     internal static AddressWarmUpResult Skipped { get; } = new(AddressWarmUpStatus.Skipped);
 }

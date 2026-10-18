@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Net;
+using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using Microsoft.Win32.SafeHandles;
@@ -18,34 +19,47 @@ internal static class WindowsIcmp
     private const int ReplyBufferSize = 1024;
     private const int ReplyStatusOffset = 28;
     private const byte DefaultHopLimit = 128;
-    private static readonly TimeSpan SendOnlyRequestTimeout = TimeSpan.FromSeconds(1);
 
-    internal static ValueTask<AddressWarmUpResult> SendEchoAsync(IPAddress sourceAddress, IPAddress destinationAddress, TimeSpan timeout, CancellationToken cancellationToken)
+    /// <summary>
+    /// Sends each echo request as its own Icmp6SendEcho2 request and completes <see cref="Reply" /> when any is answered.
+    /// Requests that are still pending free their native buffers when they complete or time out.
+    /// </summary>
+    internal sealed class EchoChannel(IPAddress sourceAddress, IPAddress destinationAddress) : IEchoChannel
     {
-        cancellationToken.ThrowIfCancellationRequested();
+        private readonly TaskCompletionSource replyCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        EchoRequest request;
-        try
+        public Task Reply => replyCompletion.Task;
+
+        public ValueTask SendAsync(TimeSpan replyTimeout, CancellationToken cancellationToken)
         {
-            request = EchoRequest.Start(sourceAddress, destinationAddress, timeout == TimeSpan.Zero ? SendOnlyRequestTimeout : timeout);
-        }
-        catch (Win32Exception exception)
-        {
-            return ValueTask.FromResult(new AddressWarmUpResult(AddressWarmUpStatus.Failed, destinationAddress, Exception: exception));
+            cancellationToken.ThrowIfCancellationRequested();
+
+            EchoRequest request = EchoRequest.Start(sourceAddress, destinationAddress, replyTimeout);
+            if (request.Completion.IsCompleted &&
+                request.Completion.Result is { Status: AddressWarmUpStatus.Failed, Exception: { } exception })
+            {
+                ExceptionDispatchInfo.Capture(exception).Throw();
+            }
+
+            request.Completion.ContinueWith(
+                static (completedRequest, state) =>
+                {
+                    if (completedRequest.Result.Status == AddressWarmUpStatus.Replied)
+                    {
+                        ((TaskCompletionSource)state!).TrySetResult();
+                    }
+                },
+                replyCompletion,
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+
+            return ValueTask.CompletedTask;
         }
 
-        if (request.Completion.IsCompleted)
+        public void Dispose()
         {
-            return new ValueTask<AddressWarmUpResult>(request.Completion);
         }
-
-        if (timeout == TimeSpan.Zero)
-        {
-            // The pending request frees its native buffers when it completes.
-            return ValueTask.FromResult(new AddressWarmUpResult(AddressWarmUpStatus.Sent, destinationAddress));
-        }
-
-        return new ValueTask<AddressWarmUpResult>(request.Completion.WaitAsync(cancellationToken));
     }
 
     private static void WriteSockaddrIn6(Span<byte> destination, IPAddress address)

@@ -12,6 +12,7 @@ public sealed class EgressAddressLease : IDisposable, IAsyncDisposable
 {
     private readonly Action release;
     private readonly IActiveResourceTracker? activeResourceTracker;
+    private readonly AssignedAddress? assignedAddress;
     private int disposed;
 
     internal EgressAddressLease(
@@ -22,7 +23,7 @@ public sealed class EgressAddressLease : IDisposable, IAsyncDisposable
         IActiveResourceTracker? activeResourceTracker = null,
         bool usesAutoDetectedPrefix = false,
         bool usesNonLocalBind = false,
-        bool createdAddress = false)
+        AssignedAddress? assignedAddress = null)
     {
         Address = address;
         InterfaceName = interfaceName;
@@ -32,7 +33,7 @@ public sealed class EgressAddressLease : IDisposable, IAsyncDisposable
         this.activeResourceTracker = activeResourceTracker;
         UsesAutoDetectedPrefix = usesAutoDetectedPrefix;
         UsesNonLocalBind = usesNonLocalBind;
-        CreatedAddress = createdAddress;
+        this.assignedAddress = assignedAddress;
     }
 
     /// <summary>
@@ -59,7 +60,8 @@ public sealed class EgressAddressLease : IDisposable, IAsyncDisposable
 
     internal bool UsesNonLocalBind { get; }
 
-    internal bool CreatedAddress { get; }
+    internal ValueTask WaitForWarmUpAsync(CancellationToken cancellationToken) =>
+        assignedAddress?.WaitForWarmUpAsync(cancellationToken) ?? ValueTask.CompletedTask;
 
     /// <summary>
     /// Gets a value indicating whether the lease has been disposed.
