@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Net;
 using System.Net.Sockets;
 using Egress.Internal;
@@ -107,6 +108,89 @@ public sealed class EchoResendTests
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => runTask.WaitAsync(TimeSpan.FromSeconds(10)));
     }
+
+    [Fact]
+    public async Task RunAsync_WindowsEchoFailsAfterSending_ReturnsFailedWithoutWaitingForTimeout()
+    {
+        TestTimeProvider timeProvider = new();
+        List<TaskCompletionSource<AddressWarmUpResult>> requests = [];
+        using WindowsIcmp.EchoChannel channel = CreateWindowsChannel(requests);
+        Win32Exception failure = new(11003, "Destination unreachable.");
+
+        Task<AddressWarmUpResult> runTask = Icmpv6Echo.RunAsync(channel, Gateway, Timeout, ResendInterval, timeProvider, CancellationToken.None).AsTask();
+        await timeProvider.WaitForCreatedTimersAsync(1);
+        Assert.Single(requests).SetResult(new AddressWarmUpResult(AddressWarmUpStatus.Failed, Gateway, Exception: failure));
+        AddressWarmUpResult result = await runTask.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(AddressWarmUpStatus.Failed, result.Status);
+        Assert.Same(failure, result.Exception);
+        Assert.Equal(Gateway, result.Gateway);
+        Assert.Equal(1, result.EchoCount);
+    }
+
+    [Fact]
+    public async Task RunAsync_WindowsResendFailsWhileFirstEchoPending_ReturnsFirstReply()
+    {
+        TestTimeProvider timeProvider = new();
+        List<TaskCompletionSource<AddressWarmUpResult>> requests = [];
+        using WindowsIcmp.EchoChannel channel = CreateWindowsChannel(requests);
+
+        Task<AddressWarmUpResult> runTask = Icmpv6Echo.RunAsync(channel, Gateway, Timeout, ResendInterval, timeProvider, CancellationToken.None).AsTask();
+        await timeProvider.WaitForCreatedTimersAsync(1);
+        timeProvider.Advance(ResendInterval);
+        await timeProvider.WaitForCreatedTimersAsync(2);
+        requests[1].SetResult(new AddressWarmUpResult(AddressWarmUpStatus.Failed, Gateway, Exception: new Win32Exception(11003)));
+
+        Assert.False(channel.Reply.IsCompleted);
+
+        requests[0].SetResult(new AddressWarmUpResult(AddressWarmUpStatus.Replied, Gateway));
+        AddressWarmUpResult result = await runTask.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(AddressWarmUpStatus.Replied, result.Status);
+        Assert.Equal(2, result.EchoCount);
+    }
+
+    [Fact]
+    public async Task SendAsync_WindowsEveryEchoFails_FailsReplyWithLastFailure()
+    {
+        List<TaskCompletionSource<AddressWarmUpResult>> requests = [];
+        using WindowsIcmp.EchoChannel channel = CreateWindowsChannel(requests);
+        Win32Exception lastFailure = new(11004, "Destination prohibited.");
+
+        await channel.SendAsync(Timeout, CancellationToken.None);
+        await channel.SendAsync(Timeout - ResendInterval, CancellationToken.None);
+        requests[0].SetResult(new AddressWarmUpResult(AddressWarmUpStatus.Failed, Gateway, Exception: new Win32Exception(11003)));
+
+        Assert.False(channel.Reply.IsCompleted);
+
+        requests[1].SetResult(new AddressWarmUpResult(AddressWarmUpStatus.Failed, Gateway, Exception: lastFailure));
+
+        Assert.Same(lastFailure, await Assert.ThrowsAsync<Win32Exception>(() => channel.Reply));
+    }
+
+    [Fact]
+    public async Task Dispose_WindowsEchoFailsAfterDisposal_LeavesReplyCanceled()
+    {
+        List<TaskCompletionSource<AddressWarmUpResult>> requests = [];
+        WindowsIcmp.EchoChannel channel = CreateWindowsChannel(requests);
+
+        await channel.SendAsync(Timeout, CancellationToken.None);
+        channel.Dispose();
+        requests[0].SetResult(new AddressWarmUpResult(AddressWarmUpStatus.Failed, Gateway, Exception: new Win32Exception(11003)));
+
+        Assert.True(channel.Reply.IsCanceled);
+    }
+
+    /// <summary>
+    /// Creates a Windows echo channel whose requests complete only when the test completes them, synchronously.
+    /// </summary>
+    private static WindowsIcmp.EchoChannel CreateWindowsChannel(List<TaskCompletionSource<AddressWarmUpResult>> requests) =>
+        new(_ =>
+        {
+            TaskCompletionSource<AddressWarmUpResult> request = new();
+            requests.Add(request);
+            return request.Task;
+        });
 
     private sealed class FakeEchoChannel : IEchoChannel
     {

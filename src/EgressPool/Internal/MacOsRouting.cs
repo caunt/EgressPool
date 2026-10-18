@@ -259,7 +259,8 @@ internal static class MacOsRouting
             byte messageType = messages[messageOffset + 3];
             if (messageLength < 4 || messageOffset + messageLength > messages.Length)
             {
-                return false;
+                // A truncated or malformed message: assume it matters, which only costs a cache refresh.
+                return true;
             }
 
             if (messageType == RtmInterfaceInfo)
@@ -304,9 +305,16 @@ internal static class MacOsRouting
             }
 
             int socketAddressLength = message[socketAddressOffset];
-            if (1 << addressBit == RtaDestination && socketAddressLength >= 2)
+            if (socketAddressLength > message.Length - socketAddressOffset)
             {
-                destinationFamily = message[socketAddressOffset + 1];
+                // The socket address runs past the end of the message.
+                return true;
+            }
+
+            ReadOnlySpan<byte> socketAddress = message.Slice(socketAddressOffset, socketAddressLength);
+            if (1 << addressBit == RtaDestination && socketAddress.Length >= 2)
+            {
+                destinationFamily = socketAddress[1];
             }
             else if (1 << addressBit == RtaNetmask)
             {
@@ -324,9 +332,7 @@ internal static class MacOsRouting
 
                 // Netmasks may be shortened: bytes past sa_len are zero, and an empty netmask is the default route.
                 int maskOffset = destinationFamily == AfInet ? 4 : 8;
-                ReadOnlySpan<byte> maskBytes = socketAddressLength > maskOffset
-                    ? message.Slice(socketAddressOffset + maskOffset, Math.Min(socketAddressLength, message.Length - socketAddressOffset) - maskOffset)
-                    : [];
+                ReadOnlySpan<byte> maskBytes = socketAddress.Length > maskOffset ? socketAddress[maskOffset..] : [];
                 return CountLeadingOneBits(maskBytes, hostPrefixLength / 8) < hostPrefixLength;
             }
 

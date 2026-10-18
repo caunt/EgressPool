@@ -23,11 +23,25 @@ internal static class WindowsIcmp
 
     /// <summary>
     /// Sends each echo request as its own Icmp6SendEcho2 request and completes <see cref="Reply" /> when any is answered.
-    /// Requests that are still pending free their native buffers when they complete or time out.
+    /// Once every request sent so far has failed, for example with an ICMPv6 destination unreachable, no reply can come
+    /// and <see cref="Reply" /> fails with the last failure. Requests that are still pending free their native buffers
+    /// when they complete or time out.
     /// </summary>
-    internal sealed class EchoChannel(IPAddress sourceAddress, IPAddress destinationAddress) : IEchoChannel
+    internal sealed class EchoChannel : IEchoChannel
     {
+        private readonly Func<TimeSpan, Task<AddressWarmUpResult>> startRequest;
         private readonly TaskCompletionSource replyCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int unfailedRequestCount;
+
+        internal EchoChannel(IPAddress sourceAddress, IPAddress destinationAddress)
+            : this(replyTimeout => EchoRequest.Start(sourceAddress, destinationAddress, replyTimeout).Completion)
+        {
+        }
+
+        internal EchoChannel(Func<TimeSpan, Task<AddressWarmUpResult>> startRequest)
+        {
+            this.startRequest = startRequest;
+        }
 
         public Task Reply => replyCompletion.Task;
 
@@ -35,22 +49,18 @@ internal static class WindowsIcmp
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            EchoRequest request = EchoRequest.Start(sourceAddress, destinationAddress, replyTimeout);
-            if (request.Completion.IsCompleted &&
-                request.Completion.Result is { Status: AddressWarmUpStatus.Failed, Exception: { } exception })
+            // Counted before the request starts, so its completion can never see fewer requests than were sent.
+            Interlocked.Increment(ref unfailedRequestCount);
+            Task<AddressWarmUpResult> requestCompletion = startRequest(replyTimeout);
+            if (requestCompletion.IsCompleted &&
+                requestCompletion.Result is { Status: AddressWarmUpStatus.Failed, Exception: { } exception })
             {
                 ExceptionDispatchInfo.Capture(exception).Throw();
             }
 
-            request.Completion.ContinueWith(
-                static (completedRequest, state) =>
-                {
-                    if (completedRequest.Result.Status == AddressWarmUpStatus.Replied)
-                    {
-                        ((TaskCompletionSource)state!).TrySetResult();
-                    }
-                },
-                replyCompletion,
+            requestCompletion.ContinueWith(
+                static (completedRequest, state) => ((EchoChannel)state!).OnRequestCompleted(completedRequest.Result),
+                this,
                 CancellationToken.None,
                 TaskContinuationOptions.ExecuteSynchronously,
                 TaskScheduler.Default);
@@ -58,8 +68,19 @@ internal static class WindowsIcmp
             return ValueTask.CompletedTask;
         }
 
-        public void Dispose()
+        // Requests that fail after disposal then find the reply already completed, so their failure never goes unobserved.
+        public void Dispose() => replyCompletion.TrySetCanceled();
+
+        private void OnRequestCompleted(AddressWarmUpResult result)
         {
+            if (result.Status == AddressWarmUpStatus.Replied)
+            {
+                replyCompletion.TrySetResult();
+            }
+            else if (result.Status == AddressWarmUpStatus.Failed && Interlocked.Decrement(ref unfailedRequestCount) == 0)
+            {
+                replyCompletion.TrySetException(result.Exception ?? new Win32Exception("The ICMPv6 echo request failed."));
+            }
         }
     }
 
@@ -219,7 +240,7 @@ internal static class WindowsIcmp
                     destinationAddress,
                     Exception: code < IpStatusBase
                         ? new Win32Exception(code)
-                        : new InvalidOperationException($"The ICMPv6 echo request failed with IP status {code}.")),
+                        : new Win32Exception(code, $"The ICMPv6 echo request failed with IP status {code}.")),
             };
 
         private void Complete(AddressWarmUpResult result)

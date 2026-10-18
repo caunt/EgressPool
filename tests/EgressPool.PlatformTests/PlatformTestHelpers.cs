@@ -12,6 +12,9 @@ namespace Egress.PlatformTests;
 internal static class PlatformTestHelpers
 {
     private static readonly int RunId = RandomNumberGenerator.GetInt32(1, 0xFFFF);
+    private static readonly IPNetwork RealInterfaceIpv4TestPrefix = IPNetwork.Parse("198.51.100.0/24");
+    private static readonly IPNetwork TestIpv6Prefix = IPNetwork.Parse("fd7a:e677:ee50::/48");
+    private static readonly ConcurrentDictionary<string, bool> CleanedRealInterfaces = new(StringComparer.Ordinal);
     private static int addressIndex;
 
     internal static bool IsLinux => RuntimeInformation.IsOSPlatform(OSPlatform.Linux);
@@ -94,6 +97,55 @@ internal static class PlatformTestHelpers
         }
 
         return IPAddress.Parse($"fd7a:e677:ee50:{RunId:x4}::{value:x4}");
+    }
+
+    /// <summary>
+    /// Creates an address for a test that adds addresses to a real interface. IPv4 addresses come from TEST-NET-2, which no
+    /// network uses, so <see cref="RemoveLeftoverRealInterfaceAddresses" /> can never remove an address the host relies on.
+    /// </summary>
+    internal static IPAddress CreateUniqueRealInterfaceAddress(AddressFamily addressFamily)
+    {
+        int value = Interlocked.Increment(ref addressIndex);
+        return addressFamily == AddressFamily.InterNetwork
+            ? IPAddress.Parse($"198.51.100.{1 + ((RunId + value) % 254)}")
+            : IPAddress.Parse($"fd7a:e677:ee50:{RunId:x4}::{value:x4}");
+    }
+
+    /// <summary>
+    /// Removes the host addresses that an earlier test run, killed before its cleanup, left on a real interface.
+    /// Runs once per interface and process, before this run adds any address there.
+    /// </summary>
+    internal static void RemoveLeftoverRealInterfaceAddresses(string interfaceName)
+    {
+        if (!CleanedRealInterfaces.TryAdd(interfaceName, true))
+        {
+            return;
+        }
+
+        foreach (UnicastIPAddressInformation addressInformation in NetworkInterfaceHelpers.ResolveInterface(interfaceName).GetIPProperties().UnicastAddresses)
+        {
+            IPAddress address = addressInformation.Address;
+            bool isLeftover = address.AddressFamily == AddressFamily.InterNetwork
+                ? RealInterfaceIpv4TestPrefix.Contains(address) && addressInformation.PrefixLength == 32
+                : TestIpv6Prefix.Contains(address) && addressInformation.PrefixLength == 128;
+            if (!isLeftover)
+            {
+                continue;
+            }
+
+            if (OperatingSystem.IsLinux())
+            {
+                NetlinkClient.DeleteAddress(UnixInterfaceNames.NameToIndex(interfaceName), address, addressInformation.PrefixLength);
+            }
+            else if (OperatingSystem.IsMacOS())
+            {
+                MacOsNetworkNative.DeleteAddress(interfaceName, address, addressInformation.PrefixLength);
+            }
+            else if (OperatingSystem.IsWindows())
+            {
+                WindowsIpHelper.DeleteUnicastAddress(WindowsIpHelper.GetInterfaceIndex(interfaceName), address, addressInformation.PrefixLength);
+            }
+        }
     }
 
     internal static IPNetwork CreateHostPrefix(IPAddress address) =>
