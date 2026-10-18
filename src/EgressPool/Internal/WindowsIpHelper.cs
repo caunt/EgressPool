@@ -13,6 +13,7 @@ internal static class WindowsIpHelper
     private const uint ErrorObjectAlreadyExists = 5010;
     private const uint ErrorNetworkUnreachable = 1231;
     private const uint ErrorHostUnreachable = 1232;
+    private const uint ErrorInvalidNetworkName = 1214;
     private const int InterfaceAliasLength = 257;
     private const int IpDadStateDuplicate = 2;
     private const int IpDadStateDeprecated = 3;
@@ -94,7 +95,10 @@ internal static class WindowsIpHelper
         SockaddrInet destinationAddress = SockaddrInet.From(destination);
         uint result = GetBestRoute2(0, interfaceIndex, 0, ref destinationAddress, 0, out MibIpForwardRow2 bestRoute, out _);
 
-        if (result is ErrorNetworkUnreachable or ErrorHostUnreachable or ErrorNotFound)
+        // A lookup scoped to an interface without a route to the destination (such as loopback for an internet
+        // address) fails with ERROR_INVALID_NETNAME.
+        if (result is ErrorNetworkUnreachable or ErrorHostUnreachable or ErrorNotFound ||
+            (result == ErrorInvalidNetworkName && interfaceIndex != 0))
         {
             return null;
         }
