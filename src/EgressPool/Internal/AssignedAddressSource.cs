@@ -40,6 +40,17 @@ internal sealed class AssignedAddressSource : IDisposable
         lastUsedTimestamp = context.TimeProvider.GetTimestamp();
     }
 
+    internal int ReadySpareCount
+    {
+        get
+        {
+            lock (stateLock)
+            {
+                return spares.Count;
+            }
+        }
+    }
+
     internal async ValueTask<AssignedAddress> AcquireAsync(CancellationToken cancellationToken)
     {
         AssignedAddress? address = TryAcquireExisting();

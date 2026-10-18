@@ -28,7 +28,7 @@ public sealed class SpareAddressTests
 
         using EgressPool pool = EgressPool.CreateForTests(CreateOptions(spareAddressCount: 1), platform, logger: null, new TestTimeProvider());
         await using EgressAddressLease firstLease = await pool.RentAddressAsync();
-        await WaitForReadySparesAsync(platform, addedAddressCount: 2);
+        await WaitForReadySparesAsync(pool, platform, readySpareCount: 1);
 
         // From now on a warm-up never completes, so a rent only finishes if it takes the ready spare.
         platform.WarmUpHandler = async (_, cancellationToken) =>
@@ -65,10 +65,12 @@ public sealed class SpareAddressTests
 
         using EgressPool pool = EgressPool.CreateForTests(CreateOptions(spareAddressCount: 2), platform, logger: null, timeProvider);
         await using EgressAddressLease lease = await pool.RentAddressAsync();
-        await WaitForReadySparesAsync(platform, addedAddressCount: 3);
+        await WaitForReadySparesAsync(pool, platform, readySpareCount: 2);
 
         timeProvider.Advance(AssignedAddressSource.SpareRefreshInterval);
-        await BehaviorTestHelpers.WaitUntilAsync(() => platform.WarmUpRequests.Count == 5, WaitTimeout);
+
+        // Each refreshed spare rejoins the ready queue after its warm-up returns; the clock may only move on after that.
+        await BehaviorTestHelpers.WaitUntilAsync(() => platform.WarmUpRequests.Count == 5 && pool.GetReadySpareCountForTests() == 2, WaitTimeout);
 
         Assert.Equal(3, platform.AddAddressCallCount);
 
@@ -85,7 +87,7 @@ public sealed class SpareAddressTests
 
         using EgressPool pool = EgressPool.CreateForTests(CreateOptions(spareAddressCount: 2), platform, logger: null, timeProvider);
         EgressAddressLease lease = await pool.RentAddressAsync();
-        await WaitForReadySparesAsync(platform, addedAddressCount: 3);
+        await WaitForReadySparesAsync(pool, platform, readySpareCount: 2);
         await lease.DisposeAsync();
 
         // Refreshes may still be running when the idle timeout passes, so keep stepping the clock until the spares are gone.
@@ -102,7 +104,7 @@ public sealed class SpareAddressTests
         EgressPool pool = EgressPool.CreateForTests(CreateOptions(spareAddressCount: 2), platform, logger: null, new TestTimeProvider());
 
         await pool.RentAddressAsync();
-        await WaitForReadySparesAsync(platform, addedAddressCount: 3);
+        await WaitForReadySparesAsync(pool, platform, readySpareCount: 2);
         pool.Dispose();
 
         Assert.Equal(3, platform.DeleteAddressCallCount);
@@ -131,15 +133,13 @@ public sealed class SpareAddressTests
             SpareAddressCount = spareAddressCount,
         };
 
-    private static async Task WaitForReadySparesAsync(FakeEgressNetworkPlatform platform, int addedAddressCount)
-    {
+    /// <summary>
+    /// Waits until the given number of warmed spares is in the ready queue, next to the one leased address.
+    /// </summary>
+    private static async Task WaitForReadySparesAsync(EgressPool pool, FakeEgressNetworkPlatform platform, int readySpareCount) =>
         await BehaviorTestHelpers.WaitUntilAsync(
-            () => platform.AddAddressCallCount == addedAddressCount && platform.WarmUpRequests.Count == addedAddressCount,
+            () => pool.GetReadySpareCountForTests() == readySpareCount && platform.AddAddressCallCount == readySpareCount + 1,
             WaitTimeout);
-
-        // The spare joins the ready queue right after its warm-up result is returned.
-        await Task.Delay(TimeSpan.FromMilliseconds(100));
-    }
 
     private static async Task AdvanceUntilAsync(TestTimeProvider timeProvider, Func<bool> predicate)
     {

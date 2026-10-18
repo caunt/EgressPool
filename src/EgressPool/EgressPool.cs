@@ -360,6 +360,9 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
         return ValueTask.CompletedTask;
     }
 
+    internal int GetReadySpareCountForTests() =>
+        assignedAddressSources.Values.Sum(static source => source.ReadySpareCount);
+
     internal static EgressPool CreateForTests(EgressPoolOptions? options, IEgressNetworkPlatform platform, ILogger<EgressPool>? logger = null, TimeProvider? timeProvider = null)
     {
         EgressPoolOptions resolvedOptions = options ?? new EgressPoolOptions();
