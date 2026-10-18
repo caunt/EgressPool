@@ -1,8 +1,6 @@
 using System.ComponentModel;
 using System.Net;
-using System.Net.NetworkInformation;
 using System.Net.Sockets;
-using System.Runtime.InteropServices;
 
 namespace Egress.Internal;
 
@@ -12,8 +10,7 @@ internal sealed class LinuxEgressNetworkPlatform : IEgressNetworkPlatform
     private const int Ipv6ProtocolLevel = 41;
     private const int IpFreeBind = 15;
     private const int Ipv6FreeBind = 78;
-    private static readonly IPAddress Ipv4DefaultRouteProbeAddress = IPAddress.Parse("8.8.8.8");
-    private static readonly IPAddress Ipv6DefaultRouteProbeAddress = IPAddress.Parse("2001:4860:4860::8888");
+    private static readonly TimeSpan AddressReadyTimeout = TimeSpan.FromSeconds(1);
 
     public bool SupportsTrueNonLocalBind => true;
 
@@ -39,42 +36,39 @@ internal sealed class LinuxEgressNetworkPlatform : IEgressNetworkPlatform
         socket.SetRawSocketOption(optionLevel, optionName, optionValue);
     }
 
-    public string GetDefaultRouteInterface(AddressFamily addressFamily)
-    {
-        IPAddress probeAddress = addressFamily switch
-        {
-            AddressFamily.InterNetwork => Ipv4DefaultRouteProbeAddress,
-            AddressFamily.InterNetworkV6 => Ipv6DefaultRouteProbeAddress,
-            _ => throw new NotSupportedException($"Address family {addressFamily} is not supported."),
-        };
-
-        return GetRouteInterface(probeAddress);
-    }
+    public string GetDefaultRouteInterface(AddressFamily addressFamily) =>
+        GetRouteInterface(NetworkInterfaceHelpers.GetDefaultRouteProbeAddress(addressFamily));
 
     public string GetRouteInterface(IPAddress destinationAddress)
     {
-        using Socket routeProbeSocket = new(destinationAddress.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
-        routeProbeSocket.Connect(new IPEndPoint(destinationAddress, 9));
-
-        if (routeProbeSocket.LocalEndPoint is not IPEndPoint localEndPoint)
+        try
         {
-            throw new InvalidOperationException($"Could not resolve a local route for destination {destinationAddress}.");
-        }
-
-        NetworkInterface[] networkInterfaces = NetworkInterface.GetAllNetworkInterfaces();
-        for (int networkInterfaceIndex = 0; networkInterfaceIndex < networkInterfaces.Length; networkInterfaceIndex++)
-        {
-            NetworkInterface networkInterface = networkInterfaces[networkInterfaceIndex];
-            foreach (UnicastIPAddressInformation addressInformation in networkInterface.GetIPProperties().UnicastAddresses)
+            // A scoped link-local destination is only reachable through the interface its scope names.
+            int outputInterfaceIndex = destinationAddress.IsIPv6LinkLocal ? checked((int)destinationAddress.ScopeId) : 0;
+            if (NetlinkClient.GetRoute(destinationAddress, outputInterfaceIndex) is { } route)
             {
-                if (addressInformation.Address.Equals(localEndPoint.Address))
-                {
-                    return networkInterface.Name;
-                }
+                return route.InterfaceName;
             }
         }
+        catch (Exception exception) when (exception is Win32Exception or InvalidOperationException)
+        {
+        }
 
-        throw new InvalidOperationException($"Could not map local route address {localEndPoint.Address} to a network interface.");
+        // No route, or netlink is unavailable: the enumeration reports the same errors as before.
+        return NetworkInterfaceHelpers.GetRouteInterface(destinationAddress);
+    }
+
+    public IPAddress? GetIpv6Gateway(string interfaceName)
+    {
+        try
+        {
+            int interfaceIndex = UnixInterfaceNames.NameToIndex(interfaceName);
+            return NetlinkClient.GetRoute(NetworkInterfaceHelpers.Ipv6DefaultRouteProbe, interfaceIndex)?.Gateway;
+        }
+        catch (Exception exception) when (exception is Win32Exception or InvalidOperationException)
+        {
+            return NetworkInterfaceHelpers.GetIpv6GatewayOrNull(interfaceName);
+        }
     }
 
     public IReadOnlyList<NetworkInterfaceAddress> GetAllocatedAddresses() =>
@@ -85,7 +79,7 @@ internal sealed class LinuxEgressNetworkPlatform : IEgressNetworkPlatform
 
     public PlatformNetworkStateLease AddAddress(string interfaceName, IPAddress address, int prefixLength)
     {
-        int interfaceIndex = GetInterfaceIndex(interfaceName);
+        int interfaceIndex = UnixInterfaceNames.NameToIndex(interfaceName);
         bool addedAddress = NetlinkClient.AddAddress(interfaceIndex, address, prefixLength);
 
         if (!addedAddress)
@@ -93,12 +87,25 @@ internal sealed class LinuxEgressNetworkPlatform : IEgressNetworkPlatform
             return PlatformNetworkStateLease.NotCreated;
         }
 
-        return new PlatformNetworkStateLease(true, new ActionDisposable(() => NetlinkClient.DeleteAddress(interfaceIndex, address, prefixLength)));
+        PlatformNetworkStateLease lease = new(true, new ActionDisposable(() => NetlinkClient.DeleteAddress(interfaceIndex, address, prefixLength)));
+        if (address.AddressFamily == AddressFamily.InterNetworkV6)
+        {
+            // IPv4 addresses are routed as local as soon as they are added; IPv6 addresses shortly after.
+            try
+            {
+                NetlinkClient.WaitUntilAddressIsLocal(address, AddressReadyTimeout);
+            }
+            catch (Exception exception) when (exception is Win32Exception or InvalidOperationException)
+            {
+            }
+        }
+
+        return lease;
     }
 
     public PlatformNetworkStateLease EnsureLocalRoute(IPNetwork prefix, string interfaceName)
     {
-        int interfaceIndex = GetInterfaceIndex(interfaceName);
+        int interfaceIndex = UnixInterfaceNames.NameToIndex(interfaceName);
         bool addedRoute = NetlinkClient.AddLocalRoute(interfaceIndex, prefix);
 
         if (!addedRoute)
@@ -109,20 +116,9 @@ internal sealed class LinuxEgressNetworkPlatform : IEgressNetworkPlatform
         return new PlatformNetworkStateLease(true, new ActionDisposable(() => NetlinkClient.DeleteLocalRoute(interfaceIndex, prefix)));
     }
 
-    public ValueTask<AddressWarmUpResult> WarmUpAddressAsync(string interfaceName, IPAddress address, TimeSpan timeout, CancellationToken cancellationToken) =>
-        AddressWarmUp.WarmUpAsync(interfaceName, address, timeout, cancellationToken);
+    public ValueTask<AddressWarmUpResult> WarmUpAddressAsync(string interfaceName, IPAddress address, IPAddress gateway, TimeSpan timeout, CancellationToken cancellationToken) =>
+        Icmpv6Echo.SendAsync(address, gateway, timeout, cancellationToken);
 
-    private static int GetInterfaceIndex(string interfaceName)
-    {
-        uint interfaceIndex = IfNameToIndex(interfaceName);
-        if (interfaceIndex == 0)
-        {
-            throw new Win32Exception(Marshal.GetLastPInvokeError(), $"Could not resolve network interface '{interfaceName}'.");
-        }
-
-        return checked((int)interfaceIndex);
-    }
-
-    [DllImport("libc", EntryPoint = "if_nametoindex", SetLastError = true)]
-    private static extern uint IfNameToIndex(string interfaceName);
+    public IDisposable? MonitorRouteChanges(Action onChange) =>
+        UnixRouteChangeMonitor.Start(NetlinkClient.OpenRouteChangeSocket(), NetlinkClient.ContainsRelevantRouteChange, onChange, UnixSocketConstants.Linux);
 }

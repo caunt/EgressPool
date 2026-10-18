@@ -7,7 +7,12 @@ namespace Egress.Internal;
 /// <summary>
 /// Warms up addresses the pool assigned, so the gateway has resolved them before the first connection uses them.
 /// </summary>
-internal sealed class AddressWarmUpService(EgressPoolOptions options, IEgressNetworkPlatform platform, ILogger? logger, TimeProvider timeProvider)
+internal sealed class AddressWarmUpService(
+    EgressPoolOptions options,
+    IEgressNetworkPlatform platform,
+    NetworkRouteCache routeCache,
+    ILogger? logger,
+    TimeProvider timeProvider)
 {
     private readonly GatewayReplyTracker gatewayReplyTracker = new(timeProvider);
 
@@ -29,7 +34,10 @@ internal sealed class AddressWarmUpService(EgressPoolOptions options, IEgressNet
         AddressWarmUpResult result;
         try
         {
-            result = await platform.WarmUpAddressAsync(interfaceName, address, options.AddressWarmUpTimeout, cancellationToken).ConfigureAwait(false);
+            IPAddress? gateway = routeCache.GetIpv6Gateway(interfaceName);
+            result = gateway is null
+                ? AddressWarmUpResult.Skipped
+                : await platform.WarmUpAddressAsync(interfaceName, address, gateway, options.AddressWarmUpTimeout, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -42,6 +50,10 @@ internal sealed class AddressWarmUpService(EgressPoolOptions options, IEgressNet
         }
 
         LogResult(interfaceName, address, result);
+        if (result.Status == AddressWarmUpStatus.Failed)
+        {
+            routeCache.InvalidateGateway(interfaceName);
+        }
 
         GatewayReplyTransition transition = gatewayReplyTracker.Record(interfaceName, decision, result.Status);
         if (transition == GatewayReplyTransition.BecameSilent)

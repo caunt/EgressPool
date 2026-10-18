@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
@@ -22,10 +23,17 @@ internal static class MacOsNetworkNative
     private static readonly ulong Siocdifaddr = Iow('i', 25, IfRequestIpv4Size);
     private static readonly ulong SiocaifaddrIn6 = Iow('i', 26, IfAliasRequestIpv6Size);
     private static readonly ulong SiocdifaddrIn6 = Iow('i', 25, IfRequestIpv6Size);
+    private static readonly ulong SiocgifaflagIn6 = Iowr('i', 73, IfRequestIpv6Size);
+    private const int In6IffTentative = 0x02;
+    private const int In6IffDuplicated = 0x04;
+    private const int In6IffDetached = 0x08;
+    private const int In6IffNoDad = 0x20;
+    private const int AliasRequestIpv6FlagsOffset = 100;
     private const int ErrnoExists = 17;
     private const int ErrnoAddressNotAvailable = 49;
     private const uint InfiniteLifetime = 0xFFFFFFFF;
     private const ulong IocIn = 0x80000000;
+    private const ulong IocInOut = 0xC0000000;
 
     internal static bool AddAddress(string interfaceName, IPAddress address, int prefixLength)
     {
@@ -195,6 +203,60 @@ internal static class MacOsNetworkNative
         }
     }
 
+    /// <summary>
+    /// Waits until an IPv6 address just added to an interface is usable, that is, neither tentative, duplicated nor detached.
+    /// </summary>
+    internal static bool WaitUntilIpv6AddressIsReady(string interfaceName, IPAddress address, TimeSpan timeout)
+    {
+        long startTimestamp = Stopwatch.GetTimestamp();
+        while (true)
+        {
+            if (TryGetIpv6AddressFlags(interfaceName, address, out int flags) &&
+                (flags & (In6IffTentative | In6IffDuplicated | In6IffDetached)) == 0)
+            {
+                return true;
+            }
+
+            if (Stopwatch.GetElapsedTime(startTimestamp) >= timeout)
+            {
+                return false;
+            }
+
+            Thread.Sleep(1);
+        }
+    }
+
+    private static unsafe bool TryGetIpv6AddressFlags(string interfaceName, IPAddress address, out int flags)
+    {
+        flags = 0;
+        int socketFileDescriptor = Socket(AfInet6, SockDgram, 0);
+        if (socketFileDescriptor < 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            var request = (stackalloc byte[IfRequestIpv6Size]);
+            BuildDeleteAddressIpv6Request(request, interfaceName, address);
+            fixed (byte* requestPointer = request)
+            {
+                if (Ioctl(socketFileDescriptor, SiocgifaflagIn6, requestPointer) != 0)
+                {
+                    return false;
+                }
+            }
+
+            // The kernel replaces the address in the union after the interface name with the address flags.
+            flags = BinaryPrimitives.ReadInt32LittleEndian(request[InterfaceNameSize..]);
+            return true;
+        }
+        finally
+        {
+            Close(socketFileDescriptor);
+        }
+    }
+
     internal static int BuildAddAddressIpv4Request(Span<byte> requestBuffer, string interfaceName, IPAddress address, int prefixLength)
     {
         ValidateRequestBuffer(requestBuffer, IfAliasRequestIpv4Size);
@@ -221,6 +283,9 @@ internal static class MacOsNetworkNative
         WriteInterfaceName(requestBuffer, interfaceName);
         WriteSockaddrIn6(requestBuffer[16..], address, AfInet6);
         WriteIpv6Mask(requestBuffer[72..], prefixLength);
+
+        // Like Linux (IFA_F_NODAD), skip duplicate address detection: a tentative address cannot be bound for about a second.
+        BinaryPrimitives.WriteInt32LittleEndian(requestBuffer[AliasRequestIpv6FlagsOffset..], In6IffNoDad);
         BinaryPrimitives.WriteUInt32LittleEndian(requestBuffer[120..], InfiniteLifetime);
         BinaryPrimitives.WriteUInt32LittleEndian(requestBuffer[124..], InfiniteLifetime);
         return IfAliasRequestIpv6Size;
@@ -352,6 +417,9 @@ internal static class MacOsNetworkNative
 
     private static ulong Iow(char group, int number, int size) =>
         IocIn | ((ulong)size << 16) | ((ulong)group << 8) | (uint)number;
+
+    private static ulong Iowr(char group, int number, int size) =>
+        IocInOut | ((ulong)size << 16) | ((ulong)group << 8) | (uint)number;
 
     [DllImport("libc", EntryPoint = "socket", SetLastError = true)]
     private static extern int Socket(int domain, int type, int protocol);

@@ -27,7 +27,9 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
     private readonly object lifecycleLock = new();
     private readonly CancellationTokenSource lifetimeTokenSource = new();
     private readonly AddressAssignmentContext addressAssignmentContext;
+    private readonly NetworkRouteCache routeCache;
     private ProcessCleanupRegistration? processCleanupRegistration;
+    private IDisposable? routeChangeMonitor;
     private ITimer? addressMaintenanceTimer;
     private int disposed;
 
@@ -37,10 +39,11 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
         this.platform = platform;
         this.logger = logger;
         this.timeProvider = timeProvider ?? TimeProvider.System;
+        routeCache = new NetworkRouteCache(platform, this.timeProvider);
         addressAssignmentContext = new AddressAssignmentContext(
             this.options,
             platform,
-            new AddressWarmUpService(this.options, platform, logger, this.timeProvider),
+            new AddressWarmUpService(this.options, platform, routeCache, logger, this.timeProvider),
             new NewAddressRateLimiter(this.options, this.timeProvider),
             this.timeProvider,
             logger,
@@ -181,6 +184,7 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
 
                     if (exception is SocketException or ObjectDisposedException)
                     {
+                        routeCache.InvalidateAfterFailure(exception);
                         lastException = exception;
                         continue;
                     }
@@ -294,6 +298,7 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
     public void Dispose()
     {
         ProcessCleanupRegistration? cleanupRegistration;
+        IDisposable? monitor;
         ITimer? maintenanceTimer;
         IDisposable[] activeResourcesSnapshot;
         IDisposable[] localRouteLeasesSnapshot;
@@ -308,6 +313,8 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
             Volatile.Write(ref disposed, 1);
             cleanupRegistration = processCleanupRegistration;
             processCleanupRegistration = null;
+            monitor = routeChangeMonitor;
+            routeChangeMonitor = null;
             maintenanceTimer = addressMaintenanceTimer;
             addressMaintenanceTimer = null;
             activeResourcesSnapshot = activeResources.Keys.ToArray();
@@ -317,6 +324,10 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
 
         cleanupRegistration?.Dispose();
         List<Exception> exceptions = [];
+        if (monitor is not null)
+        {
+            DisposeCollecting(monitor, exceptions);
+        }
 
         foreach (IDisposable activeResource in activeResourcesSnapshot)
         {
@@ -368,6 +379,8 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
 
     private void Initialize()
     {
+        StartRouteChangeMonitor();
+
         if (options.AddressMode != EgressAddressMode.NonLocalBind ||
             !options.ManageLocalRoutes ||
             !platform.SupportsTrueNonLocalBind ||
@@ -382,6 +395,19 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
             {
                 localRouteLeases.Add(AcquireLocalRoute(prefix.Network, options.LocalRouteInterfaceName));
             }
+        }
+    }
+
+    private void StartRouteChangeMonitor()
+    {
+        try
+        {
+            routeChangeMonitor = platform.MonitorRouteChanges(routeCache.Invalidate);
+        }
+        catch (Exception exception)
+        {
+            // Without notifications, cached routes still expire within seconds.
+            logger?.LogDebug(exception, "Could not monitor route changes; cached routes will only expire on their own.");
         }
     }
 
@@ -497,7 +523,7 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
 
     private SelectedEgressAddress SelectPreAssignedAddress(string interfaceName, AddressFamily requestedAddressFamily, IPAddress? destinationAddress)
     {
-        IReadOnlyList<NetworkInterfaceAddress> assignedAddresses = platform.GetAssignedAddresses(interfaceName, requestedAddressFamily);
+        IReadOnlyList<NetworkInterfaceAddress> assignedAddresses = routeCache.GetAssignedAddresses(interfaceName, requestedAddressFamily);
         bool bypassDestinationFiltering = destinationAddress is not null && TrySelectSingleConfiguredPrefix(requestedAddressFamily, out _);
         IPAddressScope? destinationScope = destinationAddress is null || bypassDestinationFiltering ? null : IPAddressScopeClassifier.GetScope(destinationAddress);
         List<SelectedEgressAddress> matchingAddresses = [];
@@ -864,10 +890,10 @@ public sealed class EgressPool : IDisposable, IAsyncDisposable, IActiveResourceT
         string selectedInterface = options.InterfaceSelectionMode switch
         {
             EgressInterfaceSelectionMode.Explicit => options.InterfaceName!,
-            EgressInterfaceSelectionMode.DefaultRoute => platform.GetDefaultRouteInterface(requestedAddressFamily),
+            EgressInterfaceSelectionMode.DefaultRoute => routeCache.GetDefaultRouteInterface(requestedAddressFamily),
             EgressInterfaceSelectionMode.PerDestinationRoute => destinationAddress is null
-                ? platform.GetDefaultRouteInterface(requestedAddressFamily)
-                : platform.GetRouteInterface(destinationAddress),
+                ? routeCache.GetDefaultRouteInterface(requestedAddressFamily)
+                : routeCache.GetRouteInterface(destinationAddress),
             EgressInterfaceSelectionMode.Custom => options.SelectInterface!(context),
             _ => throw new InvalidOperationException($"Unknown interface selection mode {options.InterfaceSelectionMode}."),
         };

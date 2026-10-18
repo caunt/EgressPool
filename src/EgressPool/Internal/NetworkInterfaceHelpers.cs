@@ -10,17 +10,21 @@ internal static class NetworkInterfaceHelpers
     private static readonly IPAddress Ipv4DefaultRouteProbeAddress = IPAddress.Parse("8.8.8.8");
     private static readonly IPAddress Ipv6DefaultRouteProbeAddress = IPAddress.Parse("2001:4860:4860::8888");
 
-    internal static string GetDefaultRouteInterface(AddressFamily addressFamily)
-    {
-        IPAddress probeAddress = addressFamily switch
+    internal static IPAddress Ipv6DefaultRouteProbe => Ipv6DefaultRouteProbeAddress;
+
+    internal static IPAddress GetDefaultRouteProbeAddress(AddressFamily addressFamily) =>
+        addressFamily switch
         {
             AddressFamily.InterNetwork => Ipv4DefaultRouteProbeAddress,
             AddressFamily.InterNetworkV6 => Ipv6DefaultRouteProbeAddress,
             _ => throw new NotSupportedException($"Address family {addressFamily} is not supported."),
         };
 
-        return GetRouteInterface(probeAddress);
-    }
+    internal static string GetDefaultRouteInterface(AddressFamily addressFamily) =>
+        GetRouteInterface(GetDefaultRouteProbeAddress(addressFamily));
+
+    internal static IPAddress? GetIpv6GatewayOrNull(string interfaceName) =>
+        TryGetIpv6Gateway(interfaceName, out IPAddress? gatewayAddress) ? gatewayAddress : null;
 
     internal static string GetRouteInterface(IPAddress destinationAddress)
     {

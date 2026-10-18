@@ -69,6 +69,16 @@ internal sealed class FakeEgressNetworkPlatform : IEgressNetworkPlatform
 
     internal Func<FakeWarmUpRequest, CancellationToken, ValueTask<AddressWarmUpResult>>? WarmUpHandler { get; set; }
 
+    internal IPAddress? Ipv6Gateway { get; set; } = IPAddress.Parse("fe80::1");
+
+    internal List<string> GatewayRequests { get; } = [];
+
+    internal bool FailRouteChangeMonitor { get; init; }
+
+    internal int ActiveRouteChangeMonitorCount { get; private set; }
+
+    private Action? routeChangeCallback;
+
     public void EnableNonLocalBind(Socket socket, AddressFamily addressFamily)
     {
         EnableNonLocalBindCallCount++;
@@ -86,6 +96,34 @@ internal sealed class FakeEgressNetworkPlatform : IEgressNetworkPlatform
         RouteRequests.Add(destinationAddress);
         return PerDestinationRouteInterfaceName;
     }
+
+    public IPAddress? GetIpv6Gateway(string interfaceName)
+    {
+        lock (syncRoot)
+        {
+            GatewayRequests.Add(interfaceName);
+        }
+
+        return Ipv6Gateway;
+    }
+
+    public IDisposable? MonitorRouteChanges(Action onChange)
+    {
+        if (FailRouteChangeMonitor)
+        {
+            throw new InvalidOperationException("Route change monitor failed.");
+        }
+
+        routeChangeCallback = onChange;
+        ActiveRouteChangeMonitorCount++;
+        return new ActionDisposable(() =>
+        {
+            routeChangeCallback = null;
+            ActiveRouteChangeMonitorCount--;
+        });
+    }
+
+    internal void RaiseRouteChange() => routeChangeCallback?.Invoke();
 
     public IReadOnlyList<NetworkInterfaceAddress> GetAllocatedAddresses()
     {
@@ -185,9 +223,9 @@ internal sealed class FakeEgressNetworkPlatform : IEgressNetworkPlatform
         return new PlatformNetworkStateLease(true, new ActionDisposable(() => DeleteLocalRoute(operation)));
     }
 
-    public ValueTask<AddressWarmUpResult> WarmUpAddressAsync(string interfaceName, IPAddress address, TimeSpan timeout, CancellationToken cancellationToken)
+    public ValueTask<AddressWarmUpResult> WarmUpAddressAsync(string interfaceName, IPAddress address, IPAddress gateway, TimeSpan timeout, CancellationToken cancellationToken)
     {
-        FakeWarmUpRequest request = new(interfaceName, address, timeout);
+        FakeWarmUpRequest request = new(interfaceName, address, gateway, timeout);
         lock (syncRoot)
         {
             WarmUpRequests.Add(request);
@@ -228,4 +266,4 @@ internal sealed record FakeAddressOperation(string InterfaceName, IPAddress Addr
 
 internal sealed record FakeRouteOperation(string InterfaceName, IPNetwork Prefix);
 
-internal sealed record FakeWarmUpRequest(string InterfaceName, IPAddress Address, TimeSpan Timeout);
+internal sealed record FakeWarmUpRequest(string InterfaceName, IPAddress Address, IPAddress Gateway, TimeSpan Timeout);
